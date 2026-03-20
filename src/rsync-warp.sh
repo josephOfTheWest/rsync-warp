@@ -163,7 +163,7 @@ run_set() {
     fi
 
     case "$status" in
-      10|30|32|255)
+      10|12|30|32|35|255)
         attempt=$((attempt + 1))
         if [ "$attempt" -ge "$max_retries" ]; then
           echo "rsync failed with exit $status after $attempt retries; giving up" | tee -a "$LOG_FILE"
@@ -178,7 +178,25 @@ run_set() {
         continue
         ;;
       *)
-        echo "rsync failed with exit $status" | tee -a "$LOG_FILE"
+        case "$status" in
+          1)  err_msg="syntax or usage error — check script arguments" ;;
+          2)  err_msg="protocol incompatibility — check rsync versions on both ends" ;;
+          3)  err_msg="source or destination path error — verify paths exist and are accessible" ;;
+          4)  err_msg="requested action not supported by remote rsync" ;;
+          5)  err_msg="error starting client-server protocol — check SSH and rsync daemon config" ;;
+          6)  err_msg="rsync daemon could not write to log file on remote" ;;
+          11) err_msg="file I/O error — check disk space and file permissions on remote" ;;
+          13) err_msg="program diagnostics error" ;;
+          14) err_msg="IPC error" ;;
+          20) err_msg="received SIGINT or SIGUSR1 — transfer was interrupted" ;;
+          21) err_msg="waitpid() error" ;;
+          22) err_msg="out of memory — insufficient RAM to complete transfer" ;;
+          23) err_msg="partial transfer — some files could not be transferred (check permissions or disk space)" ;;
+          24) err_msg="partial transfer — some source files vanished during transfer" ;;
+          25) err_msg="transfer halted — --max-delete limit reached" ;;
+          *)  err_msg="unknown error" ;;
+        esac
+        echo "rsync failed (exit $status): $err_msg" | tee -a "$LOG_FILE"
         echo "***********************************************" | tee -a "$LOG_FILE"
         rm -f "$stopfile"
         return 1

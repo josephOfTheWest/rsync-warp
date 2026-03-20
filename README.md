@@ -307,7 +307,7 @@ Each `label source target` group is launched as a background process. All sets r
 
 ### Retry and Backoff
 
-rsync-warp automatically retries on transient network errors (rsync exit codes 10, 30, 32, 255). The retry delay starts at 5 seconds and doubles after each failure, capped at 300 seconds (5 minutes). After 10 consecutive failures the set is abandoned.
+rsync-warp automatically retries on transient network errors (rsync exit codes 10, 12, 30, 32, 35, 255). The retry delay starts at 5 seconds and doubles after each failure, capped at 300 seconds (5 minutes). After 10 consecutive failures the set is abandoned.
 
 | Attempt | Delay before retry |
 |---------|--------------------|
@@ -421,6 +421,35 @@ All tunable values are near the top of `run_set` and at the `rsync_base`/`ssh_op
 ---
 
 ## Troubleshooting
+
+### rsync Exit Code Reference
+
+| Exit code | Type | Meaning |
+|-----------|------|---------|
+| 10 | Transient | Socket I/O error |
+| 12 | Transient | Error in rsync protocol data stream (network interruption mid-transfer) |
+| 30 | Transient | Timeout in data send/receive |
+| 32 | Transient | Remote shell failed |
+| 35 | Transient | Timeout waiting for daemon connection |
+| 255 | Transient | Unexplained error (SSH exit code propagated) |
+| 1 | Permanent | Syntax or usage error — check script arguments |
+| 2 | Permanent | Protocol incompatibility — check rsync versions on both ends |
+| 3 | Permanent | Source or destination path error — verify paths exist and are accessible |
+| 4 | Permanent | Requested action not supported by remote rsync |
+| 5 | Permanent | Error starting client-server protocol — check SSH and rsync daemon config |
+| 6 | Permanent | rsync daemon could not write to log file on remote |
+| 11 | Permanent | File I/O error — check disk space and file permissions on remote |
+| 13 | Permanent | Program diagnostics error |
+| 14 | Permanent | IPC error |
+| 20 | Permanent | Received SIGINT or SIGUSR1 — transfer was interrupted |
+| 22 | Permanent | Out of memory — insufficient RAM to complete transfer |
+| 23 | Permanent | Partial transfer — some files could not be transferred (check permissions or disk space) |
+| 24 | Permanent | Partial transfer — some source files vanished during transfer |
+| 25 | Permanent | Transfer halted — `--max-delete` limit reached |
+
+Transient errors are retried automatically with exponential backoff. Permanent errors are logged with a descriptive message and the set is abandoned immediately.
+
+---
 
 **rsync fails immediately with exit code 255**
 SSH connection refused or key not accepted. Verify with:
