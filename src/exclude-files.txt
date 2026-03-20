@@ -1,0 +1,34 @@
+# rsync-warp script and runtime files
+rsync-warp.sh
+exclude-files.txt
+skip-compress.txt
+rsynclogs/
+loop/
+
+# Windows system folders and files
+System Volume Information/
+FileHistory/
+$Recycle.Bin/
+$RECYCLE.BIN/
+RECYCLER/
+pagefile.sys
+swapfile.sys
+hiberfil.sys
+
+# Application excludes
+.bzvol/
+
+# Synology-specific excludes
+@eaDir/
+@SynoEAStream/
+@sharebin/
+@tmp/
+@Recently-Snapshot/
+@database/
+@appstore/
+@LogCenter/
+#recycle/
+#snapshot/
+
+# Job specific Excludes
+#/path/to/files/*

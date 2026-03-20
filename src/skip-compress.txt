@@ -1,0 +1,92 @@
+# skip-compress.txt
+# File extensions that rsync should NOT compress during transfer.
+# These are already-compressed formats where re-compressing wastes CPU
+# with no meaningful size reduction.
+# One extension per line, no leading dot, comments start with #.
+
+# Archives
+gz
+bz2
+xz
+zst
+lz4
+lzma
+zip
+7z
+rar
+tar
+tgz
+tbz2
+txz
+br
+
+# Images
+jpg
+jpeg
+png
+gif
+webp
+avif
+heic
+heif
+tif
+tiff
+
+# Video
+mp4
+mkv
+avi
+mov
+wmv
+flv
+webm
+m4v
+mpg
+mpeg
+ts
+vob
+
+# Audio
+mp3
+m4a
+aac
+ogg
+flac
+opus
+wma
+wav
+
+# Documents / Office
+pdf
+docx
+xlsx
+pptx
+odt
+ods
+odp
+epub
+
+# Executables / Packages
+exe
+dll
+so
+dylib
+apk
+deb
+rpm
+dmg
+msi
+pkg
+snap
+
+# Fonts
+woff
+woff2
+
+# Disk / VM images
+iso
+img
+vmdk
+vhd
+vhdx
+qcow2
