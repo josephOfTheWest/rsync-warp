@@ -412,7 +412,6 @@ All tunable values are near the top of `run_set` and at the `rsync_base`/`ssh_op
 |---------|----------|---------|-------|
 | rsync binary path | `rsync_base` line | `/usr/local/bin/rsync` | Change if rsync is elsewhere |
 | SSH port | `ssh-port` argument | `22` | Pass as the 4th positional argument |
-| SSH cipher | `ssh_opts` line | `aes128-gcm@openssh.com` | Optimized for AES-NI hardware |
 | Max retries | `max_retries` | `10` | Number of retry attempts per set |
 | Initial retry delay | `base_delay` | `5` seconds | Doubles after each failure, capped at 300 s |
 | Transfer timeout | `rsync_base` | `20` seconds | rsync `--timeout` value |

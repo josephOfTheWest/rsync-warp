@@ -111,7 +111,7 @@ fi
 rsync_base=(/usr/local/bin/rsync -avzh --delete --whole-file --partial --timeout=20 --exclude-from="$working_directory/exclude-files.txt" --modify-window=1 --info=progress2 --no-motd --numeric-ids --stats)
 [ -n "$skip_compress" ] && rsync_base+=("--skip-compress=$skip_compress")
 
-ssh_opts="ssh -c aes128-gcm@openssh.com -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -p $ssh_port -o ControlMaster=auto -o ControlPath=/tmp/rsync-warp-%r@%h:%p -o ControlPersist=60"
+ssh_opts="ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -p $ssh_port -o ControlMaster=auto -o ControlPath=/tmp/rsync-warp-%r@%h:%p -o ControlPersist=60"
 
 max_retries=10
 
