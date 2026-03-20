@@ -6,12 +6,29 @@ IFS=$'\n\t'
 usage() {
   cat <<EOF
 Usage:
-  $0 <remote-host> <working-dir> <dry-run:true|false> <ssh-port> <label> <source> <target> [<label> <source> <target> ...]
+  $0 <source-host> <target-host> <working-dir> <dry-run:true|false> <ssh-port> <label> <source> <target> [<label> <source> <target> ...]
 
-  ssh-port: SSH port number (default: 22)
+  source-host: SSH host to read source paths from. Pass "" for local machine.
+  target-host: SSH host to write target paths to. Pass "" for local machine.
+  working-dir: Local working directory for logs and control files. Pass "" for current directory.
+  ssh-port:    SSH port number (default: 22). Used for whichever host is remote.
 
-Example:
-  $0 example.com /var/backups true 22 mydata /data /remote/data
+  Note: at least one of source-host or target-host must be empty. Remote-to-remote
+        transfers are not supported.
+
+  Local path resolution:
+    Paths starting with "/" are treated as absolute.
+    All other paths are resolved relative to working-dir.
+
+Examples:
+  Local to remote:
+    $0 "" remote.example.com /var/backups false 22 mydata /data /remote/data
+
+  Remote to local:
+    $0 remote.example.com "" /var/backups false 22 mydata /remote/data /local/data
+
+  Local to local:
+    $0 "" "" /var/backups false 22 mydata /data /local/backup
 EOF
 }
 
@@ -26,17 +43,18 @@ if [ "$#" -eq 1 ] && [ "$1" = "--status" ]; then
   exit 0
 fi
 
-if [ "$#" -lt 5 ]; then
+if [ "$#" -lt 6 ]; then
   echo "ERROR: insufficient arguments"
   usage
   exit 1
 fi
 
-remote_host=$1
-working_directory=$2
-dry_run=$3
-ssh_port=${4:-22}
-shift 4
+source_host=$1
+target_host=$2
+working_directory=$3
+dry_run=$4
+ssh_port=${5:-22}
+shift 5
 
 
 case "${dry_run,,}" in
@@ -51,6 +69,11 @@ esac
 
 if [ -z "$working_directory" ]; then
   working_directory="$(pwd)"
+fi
+
+if [ -n "$source_host" ] && [ -n "$target_host" ]; then
+  echo "ERROR: remote-to-remote transfers are not supported; at least one of source-host or target-host must be empty"
+  exit 1
 fi
 
 stop_all=0
@@ -89,7 +112,8 @@ if [ "$set_count" -le 0 ]; then
   exit 1
 fi
 
-echo "Remote Host: $remote_host"
+echo "Source Host: ${source_host:-local}"
+echo "Target Host: ${target_host:-local}"
 echo "SSH Port:    $ssh_port"
 echo "Working Dir: $working_directory"
 echo "Dry Run:     $dry_run"
@@ -125,7 +149,28 @@ run_set() {
   local base_delay=5
 
   local LOG_FILE="${working_directory}/rsynclogs/${label}-$(date +%Y-%m-%d_%H-%M-%S).txt"
-  echo "Backing up label=$label source=$src target=$dst, log=$LOG_FILE"
+
+  # Resolve source path
+  local rsync_src
+  if [ -n "$source_host" ]; then
+    rsync_src="$source_host:$src"
+  elif [[ "$src" == /* ]]; then
+    rsync_src="$src"
+  else
+    rsync_src="$working_directory/$src"
+  fi
+
+  # Resolve target path
+  local rsync_dst
+  if [ -n "$target_host" ]; then
+    rsync_dst="$target_host:$dst"
+  elif [[ "$dst" == /* ]]; then
+    rsync_dst="$dst"
+  else
+    rsync_dst="$working_directory/$dst"
+  fi
+
+  echo "Transferring label=$label source=$rsync_src target=$rsync_dst, log=$LOG_FILE"
 
   while true; do
     if [ "${stop_all:-0}" -eq 1 ]; then
@@ -145,7 +190,7 @@ run_set() {
 
     echo "Attempt: $((attempt + 1)), log: $LOG_FILE"
 
-    rsync_cmd=("${rsync_base[@]}" ${dry_run_flag:+"$dry_run_flag"} -e "$ssh_opts" --log-file="$LOG_FILE" "$src" "$remote_host:$dst")
+    rsync_cmd=("${rsync_base[@]}" ${dry_run_flag:+"$dry_run_flag"} -e "$ssh_opts" --log-file="$LOG_FILE" "$rsync_src" "$rsync_dst")
 
     # Run rsync in a new process group so Ctrl+C/SIGINT on this script only sets stop_all and
     # does not immediately terminate the active transfer.

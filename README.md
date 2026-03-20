@@ -224,20 +224,26 @@ cab
 ### Syntax
 
 ```bash
-bash src/rsync-warp.sh <remote-host> <working-dir> <dry-run> <ssh-port> <label> <source> <target> [<label> <source> <target> ...]
+bash src/rsync-warp.sh <source-host> <target-host> <working-dir> <dry-run> <ssh-port> <label> <source> <target> [<label> <source> <target> ...]
 ```
 
 ### Arguments
 
 | Argument | Description |
 |----------|-------------|
-| `remote-host` | Hostname or IP of the remote SSH endpoint |
-| `working-dir` | Local directory for logs and run-control files. Pass an empty string `""` to use the current directory |
+| `source-host` | SSH hostname or IP to read source paths from. Pass `""` to use the local machine |
+| `target-host` | SSH hostname or IP to write target paths to. Pass `""` to use the local machine |
+| `working-dir` | Local directory for logs and run-control files. Pass `""` to use the current directory |
 | `dry-run` | `true` to simulate the transfer without writing any files; `false` for a live run |
-| `ssh-port` | SSH port on the remote host. Defaults to `22` if not specified |
+| `ssh-port` | SSH port used for whichever host is remote. Defaults to `22` |
 | `label` | Unique name for this transfer set. Used for log file names and run-control files |
-| `source` | Local path to sync from |
-| `target` | Remote path on `remote-host` to sync to |
+| `source` | Path to sync from. Absolute if starting with `/`; otherwise relative to `working-dir` |
+| `target` | Path to sync to. Absolute if starting with `/`; otherwise relative to `working-dir` |
+
+**Notes:**
+- At least one of `source-host` or `target-host` must be `""`. Remote-to-remote transfers are not supported.
+- When a host is provided, the path is passed to rsync as-is (remote paths are resolved by the remote shell).
+- When a host is `""`, absolute paths (`/…`) are used directly; relative paths are resolved against `working-dir`.
 
 Multiple `label source target` groups can be appended to run several sets in one invocation. All sets run in parallel.
 
@@ -245,43 +251,57 @@ Multiple `label source target` groups can be appended to run several sets in one
 
 ### Examples
 
-**Single set, dry run — preview what would be transferred:**
+**Local to remote — dry run preview:**
 ```bash
 bash src/rsync-warp.sh \
-  remote.example.com \
+  "" remote.example.com \
   /var/rsync-warp \
-  true \
-  22 \
+  true 22 \
   photos /mnt/data/photos /backup/photos
 ```
 
-**Single set, live run on standard SSH port:**
+**Local to remote — live run:**
 ```bash
 bash src/rsync-warp.sh \
-  remote.example.com \
+  "" remote.example.com \
   /var/rsync-warp \
-  false \
-  22 \
+  false 22 \
   photos /mnt/data/photos /backup/photos
 ```
 
-**Single set, live run on a non-standard SSH port:**
+**Remote to local — pull from remote server:**
 ```bash
 bash src/rsync-warp.sh \
-  remote.example.com \
+  remote.example.com "" \
   /var/rsync-warp \
-  false \
-  2222 \
+  false 22 \
+  photos /remote/photos /mnt/local/photos
+```
+
+**Local to remote — non-standard SSH port:**
+```bash
+bash src/rsync-warp.sh \
+  "" remote.example.com \
+  /var/rsync-warp \
+  false 2222 \
   photos /mnt/data/photos /backup/photos
+```
+
+**Local to local — copy between two local paths:**
+```bash
+bash src/rsync-warp.sh \
+  "" "" \
+  /var/rsync-warp \
+  false 22 \
+  photos /mnt/data/photos /mnt/backup/photos
 ```
 
 **Multiple sets in parallel — photos, documents, and videos synced simultaneously:**
 ```bash
 bash src/rsync-warp.sh \
-  remote.example.com \
+  "" remote.example.com \
   /var/rsync-warp \
-  false \
-  22 \
+  false 22 \
   photos    /mnt/data/photos    /backup/photos \
   documents /mnt/data/documents /backup/documents \
   videos    /mnt/data/videos    /backup/videos
@@ -289,7 +309,7 @@ bash src/rsync-warp.sh \
 
 **Using current directory as working directory:**
 ```bash
-bash src/rsync-warp.sh remote.example.com "" false 22 mydata /data /remote/data
+bash src/rsync-warp.sh "" remote.example.com "" false 22 mydata /data /remote/data
 ```
 
 **Check whether rsync-warp is currently running:**
@@ -396,7 +416,7 @@ The `photos` set will stop after its current transfer attempt completes. Other s
 If a set was cancelled before completion, recreate its PROCEED file and re-run the script with the same arguments:
 ```bash
 touch /var/rsync-warp/loop/photos-PROCEED
-bash src/rsync-warp.sh remote.example.com /var/rsync-warp false 22 \
+bash src/rsync-warp.sh "" remote.example.com /var/rsync-warp false 22 \
   photos /mnt/data/photos /backup/photos
 ```
 
@@ -455,6 +475,7 @@ SSH connection refused or key not accepted. Verify with:
 ```bash
 ssh -p 22 user@remote.example.com echo ok
 ```
+Replace `user@remote.example.com` with your source-host or target-host as appropriate.
 
 **Transfer stalls and never completes**
 The `ServerAliveInterval=30` and `ServerAliveCountMax=5` SSH options will detect a dead connection after ~150 seconds and trigger a retry automatically.
