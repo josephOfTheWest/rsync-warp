@@ -361,6 +361,10 @@ The control socket is created at `/tmp/rsync-warp-<user>@<host>:<port>` and pers
 
 In-transit compression (`-z`) is enabled for all transfers. File types that are already compressed (images, video, audio, archives, etc.) are excluded from compression via `--skip-compress`, preventing wasted CPU cycles. The list of skipped extensions is loaded from `skip-compress.txt` in the working directory.
 
+### Partial Files
+
+Interrupted transfers (due to network errors or Ctrl+C) store partially received data in a `.rsync-partial/` subdirectory inside each destination path, rather than leaving a partially-written file in place. On Ctrl+C, these directories are automatically removed. On network-error retries, rsync finds and reuses them to avoid retransferring data already received.
+
 ### Logging
 
 Each transfer set writes a single log file for the entire session (including all retry attempts) to:
@@ -397,12 +401,12 @@ Prints the PID and process state if rsync-warp is running, or exits with code 1 
 
 **From another terminal:**
 ```bash
-kill -SIGINT "$(pgrep -f '[r]sync-warp.sh')"
+pkill -SIGINT -f '[r]sync-warp.sh'
 ```
 
 **Convenience alias** (add to your shell profile):
 ```bash
-alias rsync-warp-stop='kill -SIGINT "$(pgrep -f "[r]sync-warp.sh")"'
+alias rsync-warp-stop='pkill -SIGINT -f "[r]sync-warp.sh"'
 ```
 
 **Via the STOPALL file:**
@@ -410,7 +414,7 @@ alias rsync-warp-stop='kill -SIGINT "$(pgrep -f "[r]sync-warp.sh")"'
 touch /var/rsync-warp/loop/STOPALL
 ```
 
-In all cases, the currently active rsync transfer runs to completion before the script exits. Partial files are retained on the remote (via `--partial`) and will resume on the next run.
+Active rsync transfers are terminated immediately. Any partially transferred files are cleaned up from the destination automatically. The loop control directory is also removed.
 
 ### Cancel a Single Set
 
@@ -430,7 +434,7 @@ bash src/rsync-warp.sh "" remote.example.com /var/rsync-warp false 22 false \
   photos /mnt/data/photos /backup/photos
 ```
 
-rsync will pick up where it left off thanks to `--partial` and `--whole-file`.
+rsync will pick up where it left off thanks to `--partial-dir` and `--whole-file`.
 
 ---
 

@@ -94,12 +94,24 @@ fi
 stop_all=0
 STOPALLFILE="$working_directory/loop/STOPALL"
 
-trap 'stop_all=1; touch "$STOPALLFILE" 2>/dev/null || true; echo "SIGINT/SIGTERM received; stopping after current rsync attempt..."' SIGINT SIGTERM
+trap 'stop_all=1; touch "$STOPALLFILE" 2>/dev/null || true; echo "SIGINT/SIGTERM received; terminating active transfers..."' SIGINT SIGTERM
 
 cleanup() {
   if [ "${stop_all:-0}" -eq 1 ]; then
-    echo "Cleanup: removing proceed files and exiting"
+    echo "Cleanup: removing partial files, control files, and loop directory"
+
+    # Remove .rsync-partial directories left by interrupted transfers on local targets
+    for idx in "${!targets[@]}"; do
+      dst="${targets[$idx]}"
+      if [ -z "$target_host" ]; then
+        [[ "$dst" != /* ]] && dst="$working_directory/$dst"
+        find "$dst" -name ".rsync-partial" -type d -exec rm -rf {} + 2>/dev/null || true
+      fi
+    done
+
     rm -f "$working_directory/loop/"*-PROCEED 2>/dev/null || true
+    rm -f "$STOPALLFILE" 2>/dev/null || true
+    rmdir "$working_directory/loop" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
@@ -152,13 +164,24 @@ fi
 # Set to /usr/bin/rsync for Synology NAS or any remote where rsync is not in the default SSH PATH.
 rsync_remote_path="${RSYNC_REMOTE_PATH:-}"
 
-rsync_base=(rsync -avzh --delete --whole-file --partial --timeout=20 --exclude-from="$working_directory/exclude-files.txt" --modify-window=1 --info=progress2 --no-motd --numeric-ids --stats)
+rsync_base=(rsync -avzh --delete --whole-file --partial-dir=.rsync-partial --timeout=20 --exclude-from="$working_directory/exclude-files.txt" --modify-window=1 --info=progress2 --no-motd --numeric-ids --stats)
 [ -n "$rsync_remote_path" ] && rsync_base+=(--rsync-path="$rsync_remote_path")
 [ -n "$skip_compress" ] && rsync_base+=("--skip-compress=$skip_compress")
 
 ssh_opts="ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -p $ssh_port -o ControlMaster=auto -o ControlPath=/tmp/rsync-warp-%r@%h:%p -o ControlPersist=60"
 
 max_retries=10
+
+# Converts \r to \n with line-buffered output so --info=progress2 updates reach the
+# parser immediately rather than waiting for the pipe buffer to fill.
+# Falls back to plain tr if stdbuf is unavailable.
+_cr_to_lf() {
+  if command -v stdbuf >/dev/null 2>&1; then
+    stdbuf -oL tr '\r' '\n'
+  else
+    tr '\r' '\n'
+  fi
+}
 
 # Runs pre-flight connectivity and path checks, logging all output.
 # Usage: preflight_check <log-file> <host-or-empty> <path> <"source"|"target">
@@ -189,12 +212,92 @@ preflight_check() {
   echo "--- end preflight $direction ---" | tee -a "$log_file"
 }
 
+# Renders a live per-set status table, refreshing every second using ANSI cursor movement.
+# Reads <working-dir>/loop/<label>-STATUS files written by run_set.
+# Status file format (pipe-delimited):
+#   RUNNING|<attempt>|<pct>|<speed>|<current-file>
+#   RETRYING|<attempt>|<wake-epoch>|<exit-code>|
+#   DONE|<attempt>|||
+#   FAILED|<attempt>|<exit-code>||
+display_loop() {
+  [ -t 1 ] || return 0   # only render to an interactive terminal
+  trap - EXIT             # reset the parent's EXIT trap; don't run cleanup in this subshell
+  trap 'printf "\033[999B\n"' EXIT  # on exit, move cursor past banner + table
+
+  local n="${#labels[@]}"
+  local total=$(( n + 4 ))  # header + top separator + column headers + n sets + bottom separator
+  local start_time; start_time=$(date +%s)
+  local sep; sep=$(printf '─%.0s' $(seq 1 72))
+
+  # Clear screen and print fixed ASCII art banner above the status table
+  printf '\033[2J\033[H'
+  cat <<'BANNER'
+ _ __ ___ _   _ _ __   ___  -  __        ___    ____  ____
+| '__/ __| | | | '_ \ / __|    \ \      / / \  |  _ \|  _ \
+| |  \__ \ |_| | | | | (__      \ \ /\ / / _ \ | |_) || |_) |
+|_|  |___/\__, |_| |_|\___| -   \ V  V / ___ \|  _ < |  __/
+          |___/                   \_/\_/_/   \_\_| \_\_|
+BANNER
+
+  # Reserve display space for the status table
+  local i; for (( i = 0; i < total; i++ )); do printf '\n'; done
+
+  while true; do
+    printf '\033[%dA' "$total"  # move cursor back to top of display area
+
+    local elapsed=$(( $(date +%s) - start_time ))
+    printf ' rsync-warp  ●  %d set(s)  ·  elapsed %02d:%02d\033[K\n' \
+      "$n" "$(( elapsed / 60 ))" "$(( elapsed % 60 ))"
+    printf '%s\033[K\n' "$sep"
+    # Column headers — SET% is overall bytes transferred across the whole set, not per-file
+    printf '  %-14s  %-4s  %-4s  %-8s  %-12s  %s\033[K\n' \
+      "LABEL" "ST" "ATT" "SET %" "SPEED" "CURRENT FILE"
+
+    local idx
+    for idx in "${!labels[@]}"; do
+      local lbl="${labels[$idx]}"
+      local sf="$working_directory/loop/${lbl}-STATUS"
+      local state="" attempt="" f3="" f4="" f5=""
+      [ -f "$sf" ] && IFS='|' read -r state attempt f3 f4 f5 < "$sf" || true
+
+      case "${state:-WAITING}" in
+        RUNNING)
+          local disp="${f5:--}"
+          [ "${#disp}" -gt 28 ] && disp="…${disp: -27}"
+          printf '  %-14s  ▶   %-4s  %-8s  %-12s  %s\033[K\n' \
+            "$lbl" "$attempt" "${f3:----}" "${f4:------}" "$disp"
+          ;;
+        RETRYING)
+          local remaining=$(( ${f3:-0} - $(date +%s) ))
+          [ "$remaining" -lt 0 ] && remaining=0
+          printf '  %-14s  ⟳   %-4s  retrying in %ds  (attempt %s/%s, exit %s)\033[K\n' \
+            "$lbl" "$attempt" "$remaining" "$attempt" "$max_retries" "${f4:--}"
+          ;;
+        DONE)
+          printf '  %-14s  ✓   %-4s  completed\033[K\n' "$lbl" "$attempt"
+          ;;
+        FAILED)
+          printf '  %-14s  ✗   %-4s  failed (exit %s)\033[K\n' "$lbl" "$attempt" "$f3"
+          ;;
+        *)
+          printf '  %-14s  ·        waiting\033[K\n' "$lbl"
+          ;;
+      esac
+    done
+
+    printf '%s\033[K\n' "$sep"
+    sleep 1 || true
+  done
+}
+
 run_set() {
   local idx=$1
   local label=${labels[$idx]}
   local src=${sources[$idx]}
   local dst=${targets[$idx]}
   local stopfile="$working_directory/loop/${label}-PROCEED"
+  local status_file="$working_directory/loop/${label}-STATUS"
+  local curfile_tmp="$working_directory/loop/${label}-curfile"
   local attempt=0
   local base_delay=5
 
@@ -220,46 +323,73 @@ run_set() {
     rsync_dst="$working_directory/$dst"
   fi
 
-  echo "Transferring label=$label source=$rsync_src target=$rsync_dst, log=$LOG_FILE"
+  echo "label=$label src=$rsync_src dst=$rsync_dst log=$LOG_FILE" >> "$LOG_FILE"
+  printf 'WAITING|0||||\n' > "$status_file"
 
   if [ "${verbose,,}" = "true" ]; then
-    preflight_check "$LOG_FILE" "$source_host" "$src" "source"
-    preflight_check "$LOG_FILE" "$target_host" "$dst" "target"
+    preflight_check "$LOG_FILE" "$source_host" "$src" "source" >/dev/null
+    preflight_check "$LOG_FILE" "$target_host" "$dst" "target" >/dev/null
   fi
 
   while true; do
     if [ "${stop_all:-0}" -eq 1 ]; then
-      echo "Signal request: stop_all=1; canceling item $label"
+      echo "Signal: stop_all=1; canceling $label" >> "$LOG_FILE"
+      printf 'FAILED|%s|stopped||\n' "$attempt" > "$status_file"
       return 1
     fi
 
     if [ -f "$STOPALLFILE" ]; then
-      echo "STOPALL file exists: canceling all jobs"
+      echo "STOPALL file exists: canceling $label" >> "$LOG_FILE"
+      printf 'FAILED|%s|stopped||\n' "$attempt" > "$status_file"
       return 1
     fi
 
     if [ ! -f "$stopfile" ]; then
-      echo "$stopfile does not exist: canceling item"
+      echo "$stopfile does not exist: canceling $label" >> "$LOG_FILE"
+      printf 'FAILED|%s|stopped||\n' "$attempt" > "$status_file"
       return 1
     fi
 
-    echo "Attempt: $((attempt + 1)), log: $LOG_FILE"
+    echo "Attempt: $((attempt + 1))" >> "$LOG_FILE"
+    printf 'RUNNING|%s|---|---|starting\n' "$((attempt + 1))" > "$status_file"
 
+    local rsync_exit_tmp="$working_directory/loop/${label}-exitcode"
+    local rsync_cmd
     rsync_cmd=("${rsync_base[@]}" ${dry_run_flag:+"$dry_run_flag"} -e "$ssh_opts" --log-file="$LOG_FILE" "$rsync_src" "$rsync_dst")
     [ "${verbose,,}" = "true" ] && rsync_cmd+=("--verbose" "--verbose")
 
-    # Run rsync in a new process group so Ctrl+C/SIGINT on this script only sets stop_all and
-    # does not immediately terminate the active transfer.
-    if setsid "${rsync_cmd[@]}"; then
-      status=0
-    else
-      status=$?
-    fi
+    # Run rsync piped through a progress parser that updates the status file.
+    # tr converts \r (used by --info=progress2) to \n for line-by-line reading.
+    # The exit code is written to a temp file since PIPESTATUS is unreliable after ||.
+    {
+      set +o pipefail
+      set +e
+      "${rsync_cmd[@]}" 2>&1
+      printf '%s\n' "$?" > "$rsync_exit_tmp"
+    } | _cr_to_lf | while IFS= read -r line; do
+      # Progress line: "   1,234,567  45%   2.34MB/s    0:00:15 (xfr#5, to-chk=42/100)"
+      if [[ "$line" =~ ^[[:space:]]+[0-9,]+[[:space:]]+([0-9]+)%[[:space:]]+([0-9.]+[kKMGTP]?B/s) ]]; then
+        local cf; cf=$(cat "$curfile_tmp" 2>/dev/null || printf '%s' '-')
+        printf 'RUNNING|%s|%s%%|%s|%s\n' \
+          "$((attempt + 1))" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${cf//|/?}" \
+          > "$status_file"
+      # Filename line: non-empty, starts with non-space, not a stats/message line
+      elif [[ -n "$line" ]] && [[ "$line" =~ ^[^[:space:]] ]] && \
+           ! [[ "$line" =~ ^(sent\ |received\ |total\ |Number\ |File\ list|Literal|Matched|creating\ |rsync:\ |building|delta-|sending\ incremental|done\ count|created\ dir|opening\ connection|\.[cdLDS]) ]]; then
+        printf '%s\n' "$line" > "$curfile_tmp"
+        printf 'RUNNING|%s|---|---|%s\n' "$((attempt + 1))" "${line:0:100}" > "$status_file"
+      fi
+    done || true
+
+    local status
+    status=$(cat "$rsync_exit_tmp" 2>/dev/null || printf '1')
+    rm -f "$rsync_exit_tmp" "$curfile_tmp"
 
     if [ "$status" -eq 0 ]; then
       rm -f "$stopfile"
-      echo "rsync completed successfully (exit $status)" | tee -a "$LOG_FILE"
-      echo "***********************************************" | tee -a "$LOG_FILE"
+      echo "rsync completed successfully" >> "$LOG_FILE"
+      echo "***********************************************" >> "$LOG_FILE"
+      printf 'DONE|%s|||\n' "$((attempt + 1))" > "$status_file"
       return 0
     fi
 
@@ -267,12 +397,16 @@ run_set() {
       10|12|30|32|35|255)
         attempt=$((attempt + 1))
         if [ "$attempt" -ge "$max_retries" ]; then
-          echo "rsync failed with exit $status after $attempt retries; giving up" | tee -a "$LOG_FILE"
+          echo "rsync failed with exit $status after $attempt retries; giving up" >> "$LOG_FILE"
+          echo "***********************************************" >> "$LOG_FILE"
           rm -f "$stopfile"
+          printf 'FAILED|%s|%s||\n' "$attempt" "$status" > "$status_file"
           return 1
         fi
-        echo "rsync transient failure exit $status; retrying in $base_delay seconds" | tee -a "$LOG_FILE"
-        echo "***********************************************" | tee -a "$LOG_FILE"
+        echo "rsync transient failure exit $status; retrying in $base_delay seconds" >> "$LOG_FILE"
+        echo "***********************************************" >> "$LOG_FILE"
+        local wake_at=$(( $(date +%s) + base_delay ))
+        printf 'RETRYING|%s|%s|%s|\n' "$attempt" "$wake_at" "$status" > "$status_file"
         sleep $base_delay
         base_delay=$((base_delay * 2))
         [ "$base_delay" -gt 300 ] && base_delay=300
@@ -282,12 +416,13 @@ run_set() {
           ssh -O exit -o "ControlPath=/tmp/rsync-warp-%r@%h:%p" -p "$ssh_port" "$ctrl_host" 2>/dev/null || true
         fi
         if [ "${verbose,,}" = "true" ]; then
-          preflight_check "$LOG_FILE" "$source_host" "$src" "source"
-          preflight_check "$LOG_FILE" "$target_host" "$dst" "target"
+          preflight_check "$LOG_FILE" "$source_host" "$src" "source" >/dev/null
+          preflight_check "$LOG_FILE" "$target_host" "$dst" "target" >/dev/null
         fi
         continue
         ;;
       *)
+        local err_msg
         case "$status" in
           1)  err_msg="syntax or usage error — check script arguments" ;;
           2)  err_msg="protocol incompatibility — check rsync versions on both ends" ;;
@@ -306,9 +441,10 @@ run_set() {
           25) err_msg="transfer halted — --max-delete limit reached" ;;
           *)  err_msg="unknown error" ;;
         esac
-        echo "rsync failed (exit $status): $err_msg" | tee -a "$LOG_FILE"
-        echo "***********************************************" | tee -a "$LOG_FILE"
+        echo "rsync failed (exit $status): $err_msg" >> "$LOG_FILE"
+        echo "***********************************************" >> "$LOG_FILE"
         rm -f "$stopfile"
+        printf 'FAILED|%s|%s||\n' "$((attempt + 1))" "$status" > "$status_file"
         return 1
         ;;
     esac
@@ -317,7 +453,8 @@ run_set() {
 
 cd "$working_directory"
 
-echo "Starting rsync warp backup"
+display_loop &
+display_pid=$!
 
 declare -a pids
 for idx in "${!labels[@]}"; do
@@ -329,5 +466,14 @@ exit_code=0
 for pid in "${pids[@]}"; do
   wait "$pid" || exit_code=1
 done
+
+kill "$display_pid" 2>/dev/null || true
+wait "$display_pid" 2>/dev/null || true
+
+if [ "$exit_code" -eq 0 ]; then
+  echo "All sets completed successfully."
+else
+  echo "One or more sets failed — check logs in $working_directory/rsynclogs/"
+fi
 
 exit "$exit_code"

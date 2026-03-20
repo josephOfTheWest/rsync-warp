@@ -27,8 +27,8 @@ hiberfil.sys
 @database/
 @appstore/
 @LogCenter/
-#recycle/
-#snapshot/
+[#]recycle/
+[#]snapshot/
 
 # Job specific Excludes
 #/path/to/files/*
