@@ -6,34 +6,42 @@ IFS=$'\n\t'
 usage() {
   cat <<EOF
 Usage:
-  $0 <source-host> <target-host> <working-dir> <dry-run:true|false> <ssh-port> <verbose:true|false> <label> <source> <target> [<label> <source> <target> ...]
+  $0 <remote-host> <remote-is> <working-dir> <ssh-port> <dry-run> <verbose> <label> <source-path> <target-path> [<label> <source-path> <target-path> ...]
 
-  source-host: SSH host to read source paths from. Pass "" for local machine.
-  target-host: SSH host to write target paths to. Pass "" for local machine.
-  working-dir: Local working directory for logs and control files. Pass "" for current directory.
-  ssh-port:    SSH port number (default: 22). Used for whichever host is remote.
-  verbose:     true enables pre-flight SSH/path checks before each attempt and
-               increases rsync logging detail. false for normal operation.
+  remote-host:  SSH host for the remote endpoint. Pass "" for local-to-local transfers.
+  remote-is:    "source" if the remote host provides files; "target" if it receives them.
+                Ignored when remote-host is "".
+  working-dir:  Local directory for logs and run-control files. Default: current directory.
+  ssh-port:     SSH port number. Default: 22.
+  dry-run:      true to simulate the transfer without writing files. Default: false.
+  verbose:      true enables pre-flight SSH/path checks and increased rsync log detail. Default: false.
+  label:        Unique name for this transfer set. Used for log and control file names.
+  source-path:  Path to read from. Absolute if starting with /; otherwise relative to working-dir.
+  target-path:  Path to write to. Absolute if starting with /; otherwise relative to working-dir.
 
-  Note: at least one of source-host or target-host must be empty. Remote-to-remote
-        transfers are not supported.
-
-  Local path resolution:
-    Paths starting with "/" are treated as absolute.
-    All other paths are resolved relative to working-dir.
+  Multiple label/source-path/target-path groups may be appended. All sets run in parallel.
 
 Examples:
-  Local to remote:
-    $0 "" remote.example.com /var/backups false 22 false mydata /data /remote/data
+  Pull from remote source to local target:
+    $0 remote.example.com source /var/backups "" "" "" mydata /remote/data /local/data
 
-  Remote to local:
-    $0 remote.example.com "" /var/backups false 22 false mydata /remote/data /local/data
+  Push from local source to remote target:
+    $0 remote.example.com target /var/backups "" "" "" mydata /data /remote/data
 
   Local to local:
-    $0 "" "" /var/backups false 22 false mydata /data /local/backup
+    $0 "" "" /var/backups "" "" "" mydata /data /local/backup
 
-  Local to remote with diagnostics enabled:
-    $0 "" remote.example.com /var/backups false 22 true mydata /data /remote/data
+  Non-standard SSH port with dry run:
+    $0 remote.example.com target /var/backups 2222 true false mydata /data /remote/data
+
+  Verbose diagnostics:
+    $0 remote.example.com target /var/backups "" "" true mydata /data /remote/data
+
+  Multiple sets in parallel:
+    $0 remote.example.com target /var/backups "" "" false \\
+      photos    /mnt/data/photos    /backup/photos \\
+      documents /mnt/data/documents /backup/documents \\
+      videos    /mnt/data/videos    /backup/videos
 EOF
 }
 
@@ -54,14 +62,28 @@ if [ "$#" -lt 7 ]; then
   exit 1
 fi
 
-source_host=$1
-target_host=$2
-working_directory=$3
-dry_run=$4
-ssh_port=${5:-22}
-verbose=$6
+remote_host=$1
+remote_is=$2
+working_directory=${3:-}
+ssh_port=${4:-22}
+dry_run=${5:-false}
+verbose=${6:-false}
 shift 6
 
+if [ -n "$remote_host" ]; then
+  case "${remote_is,,}" in
+    source) source_host="$remote_host"; target_host="" ;;
+    target) source_host="";             target_host="$remote_host" ;;
+    *)
+      echo "ERROR: remote-is must be 'source' or 'target' when remote-host is specified"
+      usage
+      exit 1
+      ;;
+  esac
+else
+  source_host=""
+  target_host=""
+fi
 
 case "${dry_run,,}" in
   true) dry_run_flag="--dry-run" ;;
@@ -86,11 +108,6 @@ if [ -z "$working_directory" ]; then
   working_directory="$(pwd)"
 fi
 
-if [ -n "$source_host" ] && [ -n "$target_host" ]; then
-  echo "ERROR: remote-to-remote transfers are not supported; at least one of source-host or target-host must be empty"
-  exit 1
-fi
-
 stop_all=0
 STOPALLFILE="$working_directory/loop/STOPALL"
 
@@ -101,11 +118,11 @@ cleanup() {
     echo "Cleanup: removing partial files, control files, and loop directory"
 
     # Remove .rsync-partial directories left by interrupted transfers on local targets
-    for idx in "${!targets[@]}"; do
-      dst="${targets[$idx]}"
+    for idx in "${!target_paths[@]}"; do
+      dst_path="${target_paths[$idx]}"
       if [ -z "$target_host" ]; then
-        [[ "$dst" != /* ]] && dst="$working_directory/$dst"
-        find "$dst" -name ".rsync-partial" -type d -exec rm -rf {} + 2>/dev/null || true
+        [[ "$dst_path" != /* ]] && dst_path="$working_directory/$dst_path"
+        find "$dst_path" -name ".rsync-partial" -type d -exec rm -rf {} + 2>/dev/null || true
       fi
     done
 
@@ -117,7 +134,7 @@ cleanup() {
 trap cleanup EXIT
 
 
-declare -a labels sources targets
+declare -a labels source_paths target_paths
 
 while [ "$#" -gt 0 ]; do
   if [ "$#" -lt 3 ]; then
@@ -126,8 +143,8 @@ while [ "$#" -gt 0 ]; do
     exit 1
   fi
   labels+=("$1")
-  sources+=("$2")
-  targets+=("$3")
+  source_paths+=("$2")
+  target_paths+=("$3")
   shift 3
 done
 
@@ -139,8 +156,8 @@ if [ "$set_count" -le 0 ]; then
   exit 1
 fi
 
-echo "Source Host: ${source_host:-local}"
-echo "Target Host: ${target_host:-local}"
+echo "Remote Host: ${remote_host:-local}"
+echo "Remote Is:   ${remote_is:-local}"
 echo "SSH Port:    $ssh_port"
 echo "Working Dir: $working_directory"
 echo "Dry Run:     $dry_run"
@@ -293,8 +310,8 @@ BANNER
 run_set() {
   local idx=$1
   local label=${labels[$idx]}
-  local src=${sources[$idx]}
-  local dst=${targets[$idx]}
+  local src_path=${source_paths[$idx]}
+  local dst_path=${target_paths[$idx]}
   local stopfile="$working_directory/loop/${label}-PROCEED"
   local status_file="$working_directory/loop/${label}-STATUS"
   local curfile_tmp="$working_directory/loop/${label}-curfile"
@@ -306,29 +323,29 @@ run_set() {
   # Resolve source path
   local rsync_src
   if [ -n "$source_host" ]; then
-    rsync_src="$source_host:$src"
-  elif [[ "$src" == /* ]]; then
-    rsync_src="$src"
+    rsync_src="$source_host:$src_path"
+  elif [[ "$src_path" == /* ]]; then
+    rsync_src="$src_path"
   else
-    rsync_src="$working_directory/$src"
+    rsync_src="$working_directory/$src_path"
   fi
 
   # Resolve target path
   local rsync_dst
   if [ -n "$target_host" ]; then
-    rsync_dst="$target_host:$dst"
-  elif [[ "$dst" == /* ]]; then
-    rsync_dst="$dst"
+    rsync_dst="$target_host:$dst_path"
+  elif [[ "$dst_path" == /* ]]; then
+    rsync_dst="$dst_path"
   else
-    rsync_dst="$working_directory/$dst"
+    rsync_dst="$working_directory/$dst_path"
   fi
 
   echo "label=$label src=$rsync_src dst=$rsync_dst log=$LOG_FILE" >> "$LOG_FILE"
   printf 'WAITING|0||||\n' > "$status_file"
 
   if [ "${verbose,,}" = "true" ]; then
-    preflight_check "$LOG_FILE" "$source_host" "$src" "source" >/dev/null
-    preflight_check "$LOG_FILE" "$target_host" "$dst" "target" >/dev/null
+    preflight_check "$LOG_FILE" "$source_host" "$src_path" "source" >/dev/null
+    preflight_check "$LOG_FILE" "$target_host" "$dst_path" "target" >/dev/null
   fi
 
   while true; do
@@ -416,8 +433,8 @@ run_set() {
           ssh -O exit -o "ControlPath=/tmp/rsync-warp-%r@%h:%p" -p "$ssh_port" "$ctrl_host" 2>/dev/null || true
         fi
         if [ "${verbose,,}" = "true" ]; then
-          preflight_check "$LOG_FILE" "$source_host" "$src" "source" >/dev/null
-          preflight_check "$LOG_FILE" "$target_host" "$dst" "target" >/dev/null
+          preflight_check "$LOG_FILE" "$source_host" "$src_path" "source" >/dev/null
+          preflight_check "$LOG_FILE" "$target_host" "$dst_path" "target" >/dev/null
         fi
         continue
         ;;
