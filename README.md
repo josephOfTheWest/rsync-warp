@@ -8,6 +8,7 @@ A Bash wrapper around `rsync` that optimizes and controls file transfers between
 
 - [Requirements](#requirements)
 - [Repository Structure](#repository-structure)
+- [SSH Key Setup](#ssh-key-setup)
 - [Setup](#setup)
 - [Configuration Files](#configuration-files)
   - [exclude-files.txt](#exclude-filestxt)
@@ -51,6 +52,82 @@ rsync-warp/
 │   ├── exclude-files.txt      # rsync exclude patterns (copy to working directory)
 │   └── skip-compress.txt      # File types to skip compression (copy to working directory)
 └── README.md
+```
+
+---
+
+## SSH Key Setup
+
+rsync-warp uses SSH key-based authentication — passwords are not supported because rsync runs non-interactively. If you have not set up SSH keys before, follow these steps.
+
+### Step 1 — Generate a key pair
+
+Run this on the **local machine** (the one running rsync-warp):
+
+```bash
+ssh-keygen -t ed25519 -C "rsync-warp"
+```
+
+- When prompted for a file location, press **Enter** to accept the default (`~/.ssh/id_ed25519`)
+- When prompted for a passphrase, either:
+  - Press **Enter** twice to use no passphrase (simplest for automated/scheduled use)
+  - Enter a passphrase for added security (you will need `ssh-agent` to avoid being prompted on each run — see Step 3)
+
+This creates two files:
+
+| File | Description |
+|------|-------------|
+| `~/.ssh/id_ed25519` | Private key — keep this secret, never share it |
+| `~/.ssh/id_ed25519.pub` | Public key — this is what you install on the remote host |
+
+### Step 2 — Install the public key on the remote host
+
+```bash
+ssh-copy-id -p 22 user@remote.example.com
+```
+
+Replace `user` with your username on the remote host. If `ssh-copy-id` is not available (e.g. on macOS without Homebrew), use this equivalent:
+
+```bash
+cat ~/.ssh/id_ed25519.pub | ssh -p 22 user@remote.example.com "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+```
+
+### Step 3 — (Optional) Use ssh-agent for passphrase keys
+
+If you set a passphrase in Step 1, add the key to `ssh-agent` so rsync-warp can authenticate without prompting:
+
+```bash
+eval "$(ssh-agent -s)"
+ssh-add ~/.ssh/id_ed25519
+```
+
+To have the key loaded automatically at login, add both lines to your `~/.bashrc` or `~/.bash_profile`.
+
+### Step 4 — Verify the connection
+
+```bash
+ssh -p 22 user@remote.example.com echo ok
+```
+
+You should see `ok` printed with no password prompt. If this works, rsync-warp is ready to use.
+
+### Troubleshooting SSH key setup
+
+**`Permission denied (publickey)`**
+The public key is not installed on the remote, or the remote's `~/.ssh/authorized_keys` has wrong permissions. On the remote host, run:
+```bash
+chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys
+```
+
+**Still prompted for a password**
+The remote's `sshd` may not allow key authentication. Check `/etc/ssh/sshd_config` on the remote for `PubkeyAuthentication yes`.
+
+**Multiple keys on the same machine**
+If you have more than one key pair, you can pin which key rsync-warp uses by adding a `Host` block to `~/.ssh/config`:
+```
+Host remote.example.com
+    IdentityFile ~/.ssh/id_ed25519
+    Port 22
 ```
 
 ---
