@@ -37,7 +37,7 @@ A Bash wrapper around `rsync` that optimizes and controls file transfers between
 ## Requirements
 
 - **Bash** 4.0 or later (uses arrays and `${var,,}` case folding)
-- **rsync** installed at `/usr/local/bin/rsync` (adjust path in script if needed)
+- **rsync** installed on both local and remote machines. If the remote rsync is not in the default SSH PATH (e.g. Synology NAS), set `RSYNC_REMOTE_PATH=/usr/bin/rsync` — see [Customization](#customization)
 - **SSH** access to the remote host with key-based authentication
 - **setsid** available (standard on Linux; used to isolate rsync from SIGINT)
 
@@ -224,7 +224,7 @@ cab
 ### Syntax
 
 ```bash
-bash src/rsync-warp.sh <source-host> <target-host> <working-dir> <dry-run> <ssh-port> <label> <source> <target> [<label> <source> <target> ...]
+bash src/rsync-warp.sh <source-host> <target-host> <working-dir> <dry-run> <ssh-port> <verbose> <label> <source> <target> [<label> <source> <target> ...]
 ```
 
 ### Arguments
@@ -236,6 +236,7 @@ bash src/rsync-warp.sh <source-host> <target-host> <working-dir> <dry-run> <ssh-
 | `working-dir` | Local directory for logs and run-control files. Pass `""` to use the current directory |
 | `dry-run` | `true` to simulate the transfer without writing any files; `false` for a live run |
 | `ssh-port` | SSH port used for whichever host is remote. Defaults to `22` |
+| `verbose` | `true` enables pre-flight SSH/path checks before each attempt and increases rsync log detail; `false` for normal operation |
 | `label` | Unique name for this transfer set. Used for log file names and run-control files |
 | `source` | Path to sync from. Absolute if starting with `/`; otherwise relative to `working-dir` |
 | `target` | Path to sync to. Absolute if starting with `/`; otherwise relative to `working-dir` |
@@ -256,7 +257,7 @@ Multiple `label source target` groups can be appended to run several sets in one
 bash src/rsync-warp.sh \
   "" remote.example.com \
   /var/rsync-warp \
-  true 22 \
+  true 22 false \
   photos /mnt/data/photos /backup/photos
 ```
 
@@ -265,7 +266,7 @@ bash src/rsync-warp.sh \
 bash src/rsync-warp.sh \
   "" remote.example.com \
   /var/rsync-warp \
-  false 22 \
+  false 22 false \
   photos /mnt/data/photos /backup/photos
 ```
 
@@ -274,7 +275,7 @@ bash src/rsync-warp.sh \
 bash src/rsync-warp.sh \
   remote.example.com "" \
   /var/rsync-warp \
-  false 22 \
+  false 22 false \
   photos /remote/photos /mnt/local/photos
 ```
 
@@ -283,7 +284,16 @@ bash src/rsync-warp.sh \
 bash src/rsync-warp.sh \
   "" remote.example.com \
   /var/rsync-warp \
-  false 2222 \
+  false 2222 false \
+  photos /mnt/data/photos /backup/photos
+```
+
+**Local to remote — verbose mode for troubleshooting:**
+```bash
+bash src/rsync-warp.sh \
+  "" remote.example.com \
+  /var/rsync-warp \
+  false 22 true \
   photos /mnt/data/photos /backup/photos
 ```
 
@@ -292,7 +302,7 @@ bash src/rsync-warp.sh \
 bash src/rsync-warp.sh \
   "" "" \
   /var/rsync-warp \
-  false 22 \
+  false 22 false \
   photos /mnt/data/photos /mnt/backup/photos
 ```
 
@@ -301,7 +311,7 @@ bash src/rsync-warp.sh \
 bash src/rsync-warp.sh \
   "" remote.example.com \
   /var/rsync-warp \
-  false 22 \
+  false 22 false \
   photos    /mnt/data/photos    /backup/photos \
   documents /mnt/data/documents /backup/documents \
   videos    /mnt/data/videos    /backup/videos
@@ -309,7 +319,7 @@ bash src/rsync-warp.sh \
 
 **Using current directory as working directory:**
 ```bash
-bash src/rsync-warp.sh "" remote.example.com "" false 22 mydata /data /remote/data
+bash src/rsync-warp.sh "" remote.example.com "" false 22 false mydata /data /remote/data
 ```
 
 **Check whether rsync-warp is currently running:**
@@ -416,7 +426,7 @@ The `photos` set will stop after its current transfer attempt completes. Other s
 If a set was cancelled before completion, recreate its PROCEED file and re-run the script with the same arguments:
 ```bash
 touch /var/rsync-warp/loop/photos-PROCEED
-bash src/rsync-warp.sh "" remote.example.com /var/rsync-warp false 22 \
+bash src/rsync-warp.sh "" remote.example.com /var/rsync-warp false 22 false \
   photos /mnt/data/photos /backup/photos
 ```
 
@@ -430,8 +440,9 @@ All tunable values are near the top of `run_set` and at the `rsync_base`/`ssh_op
 
 | Setting | Location | Default | Notes |
 |---------|----------|---------|-------|
-| rsync binary path | `rsync_base` line | `/usr/local/bin/rsync` | Change if rsync is elsewhere |
-| SSH port | `ssh-port` argument | `22` | Pass as the 4th positional argument |
+| Remote rsync binary path | `RSYNC_REMOTE_PATH` env var | _(empty — use remote PATH)_ | Set to `/usr/bin/rsync` when the remote's SSH PATH does not include rsync (e.g. Synology NAS) |
+| SSH port | `ssh-port` argument | `22` | Pass as the 5th positional argument |
+| Verbose/diagnostic mode | `verbose` argument | `false` | Pass `true` to enable pre-flight checks and increased rsync logging |
 | Max retries | `max_retries` | `10` | Number of retry attempts per set |
 | Initial retry delay | `base_delay` | `5` seconds | Doubles after each failure, capped at 300 s |
 | Transfer timeout | `rsync_base` | `20` seconds | rsync `--timeout` value |
@@ -469,6 +480,21 @@ All tunable values are near the top of `run_set` and at the `rsync_base`/`ssh_op
 Transient errors are retried automatically with exponential backoff. Permanent errors are logged with a descriptive message and the set is abandoned immediately.
 
 ---
+
+**rsync fails with exit code 12 against a Synology NAS (or similar appliance)**
+The remote SSH session may not include `/usr/bin` in its PATH, causing rsync to fail when starting the remote protocol handshake. Set the `RSYNC_REMOTE_PATH` environment variable to the full path of rsync on the remote:
+```bash
+export RSYNC_REMOTE_PATH=/usr/bin/rsync
+bash src/rsync-warp.sh "" nas.example.com /var/rsync-warp false 22 false mydata /data /backup
+```
+Or inline it for a single run:
+```bash
+RSYNC_REMOTE_PATH=/usr/bin/rsync bash src/rsync-warp.sh ...
+```
+To verify the correct path, run:
+```bash
+ssh -p 22 user@nas.example.com "which rsync || command -v rsync"
+```
 
 **rsync fails immediately with exit code 255**
 SSH connection refused or key not accepted. Verify with:

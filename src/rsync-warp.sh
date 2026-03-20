@@ -6,12 +6,14 @@ IFS=$'\n\t'
 usage() {
   cat <<EOF
 Usage:
-  $0 <source-host> <target-host> <working-dir> <dry-run:true|false> <ssh-port> <label> <source> <target> [<label> <source> <target> ...]
+  $0 <source-host> <target-host> <working-dir> <dry-run:true|false> <ssh-port> <verbose:true|false> <label> <source> <target> [<label> <source> <target> ...]
 
   source-host: SSH host to read source paths from. Pass "" for local machine.
   target-host: SSH host to write target paths to. Pass "" for local machine.
   working-dir: Local working directory for logs and control files. Pass "" for current directory.
   ssh-port:    SSH port number (default: 22). Used for whichever host is remote.
+  verbose:     true enables pre-flight SSH/path checks before each attempt and
+               increases rsync logging detail. false for normal operation.
 
   Note: at least one of source-host or target-host must be empty. Remote-to-remote
         transfers are not supported.
@@ -22,13 +24,16 @@ Usage:
 
 Examples:
   Local to remote:
-    $0 "" remote.example.com /var/backups false 22 mydata /data /remote/data
+    $0 "" remote.example.com /var/backups false 22 false mydata /data /remote/data
 
   Remote to local:
-    $0 remote.example.com "" /var/backups false 22 mydata /remote/data /local/data
+    $0 remote.example.com "" /var/backups false 22 false mydata /remote/data /local/data
 
   Local to local:
-    $0 "" "" /var/backups false 22 mydata /data /local/backup
+    $0 "" "" /var/backups false 22 false mydata /data /local/backup
+
+  Local to remote with diagnostics enabled:
+    $0 "" remote.example.com /var/backups false 22 true mydata /data /remote/data
 EOF
 }
 
@@ -43,7 +48,7 @@ if [ "$#" -eq 1 ] && [ "$1" = "--status" ]; then
   exit 0
 fi
 
-if [ "$#" -lt 6 ]; then
+if [ "$#" -lt 7 ]; then
   echo "ERROR: insufficient arguments"
   usage
   exit 1
@@ -54,14 +59,24 @@ target_host=$2
 working_directory=$3
 dry_run=$4
 ssh_port=${5:-22}
-shift 5
+verbose=$6
+shift 6
 
 
 case "${dry_run,,}" in
-  true) dry_run_flag="--dry-run" ;; 
-  false) dry_run_flag="" ;; 
+  true) dry_run_flag="--dry-run" ;;
+  false) dry_run_flag="" ;;
   *)
     echo "ERROR: dry-run must be 'true' or 'false'"
+    usage
+    exit 1
+    ;;
+esac
+
+case "${verbose,,}" in
+  true|false) ;;
+  *)
+    echo "ERROR: verbose must be 'true' or 'false'"
     usage
     exit 1
     ;;
@@ -117,6 +132,7 @@ echo "Target Host: ${target_host:-local}"
 echo "SSH Port:    $ssh_port"
 echo "Working Dir: $working_directory"
 echo "Dry Run:     $dry_run"
+echo "Verbose:     $verbose"
 echo "Set Count:   $set_count"
 
 mkdir -p "$working_directory/loop" "$working_directory/rsynclogs"
@@ -132,12 +148,46 @@ if [ -f "$working_directory/skip-compress.txt" ]; then
   skip_compress="${skip_compress%/}"
 fi
 
-rsync_base=(/usr/local/bin/rsync -avzh --delete --whole-file --partial --timeout=20 --exclude-from="$working_directory/exclude-files.txt" --modify-window=1 --info=progress2 --no-motd --numeric-ids --stats)
+# Override the remote rsync binary path. Leave empty to rely on the remote's PATH.
+# Set to /usr/bin/rsync for Synology NAS or any remote where rsync is not in the default SSH PATH.
+rsync_remote_path="${RSYNC_REMOTE_PATH:-}"
+
+rsync_base=(rsync -avzh --delete --whole-file --partial --timeout=20 --exclude-from="$working_directory/exclude-files.txt" --modify-window=1 --info=progress2 --no-motd --numeric-ids --stats)
+[ -n "$rsync_remote_path" ] && rsync_base+=(--rsync-path="$rsync_remote_path")
 [ -n "$skip_compress" ] && rsync_base+=("--skip-compress=$skip_compress")
 
-ssh_opts="ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -p $ssh_port -o ControlMaster=auto -o ControlPath=/tmp/rsync-warp-%r@%h:%p -o ControlPersist=60"
+ssh_opts="ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -p $ssh_port -o ControlMaster=auto -o ControlPath=/tmp/rsync-warp-%r@%h:%p -o ControlPersist=60"
 
 max_retries=10
+
+# Runs pre-flight connectivity and path checks, logging all output.
+# Usage: preflight_check <log-file> <host-or-empty> <path> <"source"|"target">
+preflight_check() {
+  local log_file=$1
+  local host=$2
+  local path=$3
+  local direction=$4
+
+  echo "--- preflight $direction: ${host:-local}:$path ---" | tee -a "$log_file"
+
+  if [ -n "$host" ]; then
+    echo "[SSH] testing connection to $host..." | tee -a "$log_file"
+    if ssh -q -o ConnectTimeout=10 -o BatchMode=yes -p "$ssh_port" "$host" echo "ssh-ok" 2>&1 | tee -a "$log_file"; then
+      echo "[SSH] connection OK" | tee -a "$log_file"
+      echo "[SSH] remote rsync version:" | tee -a "$log_file"
+      ssh -p "$ssh_port" "$host" "rsync --version 2>&1 | head -1" 2>&1 | tee -a "$log_file" || true
+      echo "[$direction] path check: $path" | tee -a "$log_file"
+      ssh -p "$ssh_port" "$host" "ls -lad \"$path\" 2>&1" 2>&1 | tee -a "$log_file" || true
+    else
+      echo "[SSH] connection FAILED to $host" | tee -a "$log_file"
+    fi
+  else
+    echo "[$direction] local path check: $path" | tee -a "$log_file"
+    ls -lad "$path" 2>&1 | tee -a "$log_file" || true
+  fi
+
+  echo "--- end preflight $direction ---" | tee -a "$log_file"
+}
 
 run_set() {
   local idx=$1
@@ -172,6 +222,11 @@ run_set() {
 
   echo "Transferring label=$label source=$rsync_src target=$rsync_dst, log=$LOG_FILE"
 
+  if [ "${verbose,,}" = "true" ]; then
+    preflight_check "$LOG_FILE" "$source_host" "$src" "source"
+    preflight_check "$LOG_FILE" "$target_host" "$dst" "target"
+  fi
+
   while true; do
     if [ "${stop_all:-0}" -eq 1 ]; then
       echo "Signal request: stop_all=1; canceling item $label"
@@ -191,6 +246,7 @@ run_set() {
     echo "Attempt: $((attempt + 1)), log: $LOG_FILE"
 
     rsync_cmd=("${rsync_base[@]}" ${dry_run_flag:+"$dry_run_flag"} -e "$ssh_opts" --log-file="$LOG_FILE" "$rsync_src" "$rsync_dst")
+    [ "${verbose,,}" = "true" ] && rsync_cmd+=("--verbose" "--verbose")
 
     # Run rsync in a new process group so Ctrl+C/SIGINT on this script only sets stop_all and
     # does not immediately terminate the active transfer.
@@ -220,6 +276,15 @@ run_set() {
         sleep $base_delay
         base_delay=$((base_delay * 2))
         [ "$base_delay" -gt 300 ] && base_delay=300
+        # Close any stale ControlMaster socket so the next attempt opens a fresh connection
+        local ctrl_host="${source_host:-$target_host}"
+        if [ -n "$ctrl_host" ]; then
+          ssh -O exit -o "ControlPath=/tmp/rsync-warp-%r@%h:%p" -p "$ssh_port" "$ctrl_host" 2>/dev/null || true
+        fi
+        if [ "${verbose,,}" = "true" ]; then
+          preflight_check "$LOG_FILE" "$source_host" "$src" "source"
+          preflight_check "$LOG_FILE" "$target_host" "$dst" "target"
+        fi
         continue
         ;;
       *)
