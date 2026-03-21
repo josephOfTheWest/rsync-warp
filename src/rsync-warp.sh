@@ -249,27 +249,63 @@ preflight_check() {
 
 # Renders a live per-set status table, refreshing every second using ANSI cursor movement.
 # Reads <working-dir>/loop/<label>-STATUS files written by run_set.
-# Status file format (pipe-delimited):
+# Status file format (pipe-delimited, always 5 fields / 4 pipes):
+#   WAITING|0||||
 #   RUNNING|<attempt>|<pct>|<speed>|<current-file>
 #   RETRYING|<attempt>|<wake-epoch>|<exit-code>|
 #   DONE|<attempt>|||
 #   FAILED|<attempt>|<exit-code>||
+# Note: <current-file> has any literal '|' characters replaced with '?' to
+# protect the delimiter — filenames containing pipes will display with '?'.
 display_loop() {
   [ -t 1 ] || return 0   # only render to an interactive terminal
   trap - EXIT             # reset the parent's EXIT trap; don't run cleanup in this subshell
   trap 'printf "\033[999B\n"' EXIT  # on exit, move cursor past banner + table
 
   local n="${#labels[@]}"
-  local total=$(( n + 4 ))  # header + top separator + column headers + n sets + bottom separator
+  local total=$(( n + 4 ))  # elapsed + top separator + column headers + n rows + bottom separator
   local start_time; start_time=$(date +%s)
-  # Match the static param tables above, which are hardcoded to 100 chars wide.
-  local term_cols=100
-  # Fixed visible chars before the two file columns: 2+10+2+1+5+4+2+8+2+12+2 = 50, plus 2 between them
+
+  # Terminal width: inherited from the parent shell (set just before display_loop &),
+  # where tput cols has reliable TTY access. All three tables use this single value.
+  local term_cols="${term_cols:-100}"
+  local _inner=$(( term_cols - 2 ))
+
+  # Params table — full-width row value widths (label widths are fixed):
+  #   " working-directory: " = 1+18+1 = 20  →  value fills the rest
+  #   " remote-host: "       = 1+12+1 = 14  →  value fills the rest
+  local _wd_w=$(( _inner - 20 ))
+  local _rh_w=$(( _inner - 14 ))
+
+  # Params table — 4-cell row: values scale proportionally to the base 20/11/11/10
+  # ratio (sum=52). Fixed label+spacing overhead per cell: 12+11+10+10=43; 3 dividers.
+  local _val_total=$(( term_cols - 48 ))
+  local _v2=$(( _val_total * 11 / 52 ))
+  local _v3=$(( _val_total * 11 / 52 ))
+  local _v4=$(( _val_total * 10 / 52 ))
+  local _v1=$(( _val_total - _v2 - _v3 - _v4 ))  # gets integer-division slack
+
+  # Sets table — LABEL cell fixed (10-char content + 2 padding = 12);
+  # SOURCE/TARGET split the remainder. _st_path_w2 absorbs the 1-char slack on odd widths.
+  local _st_path_w=$(( (term_cols - 20) / 2 ))
+  local _st_path_w2=$(( term_cols - 20 - _st_path_w ))
+
+  # Status table — file columns fill remaining space after the fixed columns (50 + 2 separator)
   local _file_avail=$(( term_cols - 52 ))
   local _name_w=$(( _file_avail / 3 ))
   [ "$_name_w" -lt 12 ] && _name_w=12  # must fit "CURRENT FILE" header without overflowing
   local _path_w=$(( _file_avail - _name_w ))
-  local sep; sep=$(printf '─%.0s' $(seq 1 "$term_cols"))
+
+  # Dash strings derived from the widths above
+  local _d_inner;   _d_inner=$(printf  '─%.0s' $(seq 1 "$_inner"))
+  local _dc1;       _dc1=$(printf      '─%.0s' $(seq 1 $(( 12 + _v1 ))))
+  local _dc2;       _dc2=$(printf      '─%.0s' $(seq 1 $(( 11 + _v2 ))))
+  local _dc3;       _dc3=$(printf      '─%.0s' $(seq 1 $(( 10 + _v3 ))))
+  local _dc4;       _dc4=$(printf      '─%.0s' $(seq 1 $(( 10 + _v4 ))))
+  local _d_stlabel; _d_stlabel=$(printf '─%.0s' $(seq 1 12))
+  local _d_stpath1; _d_stpath1=$(printf '─%.0s' $(seq 1 $(( _st_path_w  + 2 ))))
+  local _d_stpath2; _d_stpath2=$(printf '─%.0s' $(seq 1 $(( _st_path_w2 + 2 ))))
+  local sep;        sep=$(printf        '─%.0s' $(seq 1 "$term_cols"))
 
   # Clear screen and print fixed ASCII art banner above the status table
   printf '\033[2J\033[H'
@@ -279,13 +315,13 @@ display_loop() {
 | '__/ __| | | | '_ \ / __|\ \ /\ / / ¤ \ | |¯) | |_) |
 | |  \__ \ |_| | | | | (__  \ V  V / /—\ \|  ¯ <|  __/
 |_|  |___/\__, |_| |_|\___|  \_/\_/_/   \_\_|¯\_\_|
-          |___/             
+          |___/
 BANNER
 
   local wd_disp="$working_directory"
-  [ "${#wd_disp}" -gt 78 ] && wd_disp="…${wd_disp: -77}"
+  [ "${#wd_disp}" -gt "$_wd_w" ] && wd_disp="…${wd_disp: -(( _wd_w - 1 ))}"
   local rh_disp="${remote_host:-(local)}"
-  [ "${#rh_disp}" -gt 84 ] && rh_disp="…${rh_disp: -83}"
+  [ "${#rh_disp}" -gt "$_rh_w" ] && rh_disp="…${rh_disp: -(( _rh_w - 1 ))}"
 
   # Colors
   local _bd=$'\033[90m'    # dark gray     — borders
@@ -297,44 +333,34 @@ BANNER
   local _c_don=$'\033[33m' # gold          — done ✓
   local _c_err=$'\033[91m' # bright red    — failed ✗
 
-  # Table: total width 100, inner 98
-  # Row 3 cell content widths: 32 | 22 | 21 | 20  (sum=95, +3 internal + 2 outer │ = 100)
-  local _d98; _d98=$(printf '─%.0s' $(seq 1 98))
-  local _d32; _d32=$(printf '─%.0s' $(seq 1 32))
-  local _d22; _d22=$(printf '─%.0s' $(seq 1 22))
-  local _d21; _d21=$(printf '─%.0s' $(seq 1 21))
-  local _d20; _d20=$(printf '─%.0s' $(seq 1 20))
-
-  printf "${_bd}┌%s┐${_rs}\n" "$_d98"
-  printf "${_bd}│${_rs} ${_lb}working-directory:${_rs} ${_vl}%-78s${_rs}${_bd}│${_rs}\n" "$wd_disp"
-  printf "${_bd}├%s┤${_rs}\n" "$_d98"
-  printf "${_bd}│${_rs} ${_lb}remote-host:${_rs} ${_vl}%-84s${_rs}${_bd}│${_rs}\n" "$rh_disp"
-  printf "${_bd}├%s┬%s┬%s┬%s┤${_rs}\n" "$_d32" "$_d22" "$_d21" "$_d20"
-  printf "${_bd}│${_rs} ${_lb}remote-is:${_rs} ${_vl}%-20s${_rs}${_bd}│${_rs} ${_lb}ssh-port:${_rs} ${_vl}%-11s${_rs}${_bd}│${_rs} ${_lb}dry-run:${_rs} ${_vl}%-11s${_rs}${_bd}│${_rs} ${_lb}verbose:${_rs} ${_vl}%-10s${_rs}${_bd}│${_rs}\n" \
+  printf "${_bd}┌%s┐${_rs}\n" "$_d_inner"
+  printf "${_bd}│${_rs} ${_lb}working-directory:${_rs} ${_vl}%-${_wd_w}s${_rs}${_bd}│${_rs}\n" "$wd_disp"
+  printf "${_bd}├%s┤${_rs}\n" "$_d_inner"
+  printf "${_bd}│${_rs} ${_lb}remote-host:${_rs} ${_vl}%-${_rh_w}s${_rs}${_bd}│${_rs}\n" "$rh_disp"
+  printf "${_bd}├%s┬%s┬%s┬%s┤${_rs}\n" "$_dc1" "$_dc2" "$_dc3" "$_dc4"
+  printf "${_bd}│${_rs} ${_lb}remote-is:${_rs} ${_vl}%-${_v1}s${_rs}${_bd}│${_rs} ${_lb}ssh-port:${_rs} ${_vl}%-${_v2}s${_rs}${_bd}│${_rs} ${_lb}dry-run:${_rs} ${_vl}%-${_v3}s${_rs}${_bd}│${_rs} ${_lb}verbose:${_rs} ${_vl}%-${_v4}s${_rs}${_bd}│${_rs}\n" \
     "${remote_is:-(local)}" "$ssh_port" "$dry_run" "$verbose"
-  printf "${_bd}└%s┴%s┴%s┴%s┘${_rs}\n" "$_d32" "$_d22" "$_d21" "$_d20"
+  printf "${_bd}└%s┴%s┴%s┴%s┘${_rs}\n" "$_dc1" "$_dc2" "$_dc3" "$_dc4"
   printf '\n'
   printf ' rsync-warp  ●  %d set(s)\n' "$n"
   printf '\n'
 
-  local _d12; _d12=$(printf '─%.0s' $(seq 1 12))
-  local _d42; _d42=$(printf '─%.0s' $(seq 1 42))
-  printf "${_bd}┌%s┬%s┬%s┐${_rs}\n" "$_d12" "$_d42" "$_d42"
-  printf "${_bd}│${_rs} ${_lb}%-10s${_rs} ${_bd}│${_rs} ${_lb}%-40s${_rs} ${_bd}│${_rs} ${_lb}%-40s${_rs} ${_bd}│${_rs}\n" \
+  printf "${_bd}┌%s┬%s┬%s┐${_rs}\n" "$_d_stlabel" "$_d_stpath1" "$_d_stpath2"
+  printf "${_bd}│${_rs} ${_lb}%-10s${_rs} ${_bd}│${_rs} ${_lb}%-${_st_path_w}s${_rs} ${_bd}│${_rs} ${_lb}%-${_st_path_w2}s${_rs} ${_bd}│${_rs}\n" \
     "LABEL" "SOURCE PATH" "TARGET PATH"
-  printf "${_bd}├%s┼%s┼%s┤${_rs}\n" "$_d12" "$_d42" "$_d42"
+  printf "${_bd}├%s┼%s┼%s┤${_rs}\n" "$_d_stlabel" "$_d_stpath1" "$_d_stpath2"
   local _si
   for _si in "${!labels[@]}"; do
     local _lbl_s="${labels[$_si]}"
     local _sp="${source_paths[$_si]}"
     local _tp="${target_paths[$_si]}"
     [ "${#_lbl_s}" -gt 10 ] && _lbl_s="${_lbl_s:0:9}…"
-    [ "${#_sp}" -gt 40 ] && _sp="${_sp:0:39}…"
-    [ "${#_tp}" -gt 40 ] && _tp="${_tp:0:39}…"
-    printf "${_bd}│${_rs} ${_vl}%-10s${_rs} ${_bd}│${_rs} ${_vl}%-40s${_rs} ${_bd}│${_rs} ${_vl}%-40s${_rs} ${_bd}│${_rs}\n" \
+    [ "${#_sp}" -gt "$_st_path_w"  ] && _sp="${_sp:0:$(( _st_path_w  - 1 ))}…"
+    [ "${#_tp}" -gt "$_st_path_w2" ] && _tp="${_tp:0:$(( _st_path_w2 - 1 ))}…"
+    printf "${_bd}│${_rs} ${_vl}%-10s${_rs} ${_bd}│${_rs} ${_vl}%-${_st_path_w}s${_rs} ${_bd}│${_rs} ${_vl}%-${_st_path_w2}s${_rs} ${_bd}│${_rs}\n" \
       "$_lbl_s" "$_sp" "$_tp"
   done
-  printf "${_bd}└%s┴%s┴%s┘${_rs}\n" "$_d12" "$_d42" "$_d42"
+  printf "${_bd}└%s┴%s┴%s┘${_rs}\n" "$_d_stlabel" "$_d_stpath1" "$_d_stpath2"
   printf '\n'
 
   # Reserve display space for the status table
@@ -477,6 +503,8 @@ run_set() {
       # Progress line: "   1,234,567  45%   2.34MB/s    0:00:15 (xfr#5, to-chk=42/100)"
       if [[ "$line" =~ ^[[:space:]]+[^[:space:]]+[[:space:]]+([0-9]+)%[[:space:]]+([0-9.]+[kKMGTP]?B/s) ]]; then
         local cf; cf=$(cat "$curfile_tmp" 2>/dev/null || printf '%s' '-')
+        # Filenames containing '|' (valid on Unix) are sanitised with '?' to protect
+        # the pipe-delimited status file format; display only — no data is lost.
         printf 'RUNNING|%s|%s%%|%s|%s\n' \
           "$((attempt + 1))" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${cf//|/?}" \
           > "$status_file"
@@ -557,6 +585,11 @@ run_set() {
     esac
   done
 }
+
+# Read terminal width in the parent shell where tput has reliable TTY access.
+# display_loop inherits this value; tput cols is unreliable in background processes.
+term_cols=$(tput cols 2>/dev/null || echo 100)
+[ "$term_cols" -lt 80 ] && term_cols=80
 
 display_loop &
 display_pid=$!
