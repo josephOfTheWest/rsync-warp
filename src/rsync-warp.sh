@@ -257,6 +257,39 @@ display_loop() {
           |___/             
 BANNER
 
+  local wd_disp="$working_directory"
+  [ "${#wd_disp}" -gt 78 ] && wd_disp="…${wd_disp: -77}"
+  local rh_disp="${remote_host:-(local)}"
+  [ "${#rh_disp}" -gt 84 ] && rh_disp="…${rh_disp: -83}"
+
+  # Colors
+  local _bd=$'\033[90m'    # dark gray     — borders
+  local _lb=$'\033[36m'    # cyan          — labels
+  local _vl=$'\033[93m'    # bright yellow — values
+  local _rs=$'\033[0m'     # reset
+  local _c_run=$'\033[92m' # bright green  — running ▶
+  local _c_ret=$'\033[93m' # bright yellow — retrying ⟳
+  local _c_don=$'\033[33m' # gold          — done ✓
+  local _c_err=$'\033[91m' # bright red    — failed ✗
+
+  # Table: total width 100, inner 98
+  # Row 3 cell content widths: 32 | 22 | 21 | 20  (sum=95, +3 internal + 2 outer │ = 100)
+  local _d98; _d98=$(printf '─%.0s' $(seq 1 98))
+  local _d32; _d32=$(printf '─%.0s' $(seq 1 32))
+  local _d22; _d22=$(printf '─%.0s' $(seq 1 22))
+  local _d21; _d21=$(printf '─%.0s' $(seq 1 21))
+  local _d20; _d20=$(printf '─%.0s' $(seq 1 20))
+
+  printf "${_bd}┌%s┐${_rs}\n" "$_d98"
+  printf "${_bd}│${_rs} ${_lb}working-directory:${_rs} ${_vl}%-78s${_rs}${_bd}│${_rs}\n" "$wd_disp"
+  printf "${_bd}├%s┤${_rs}\n" "$_d98"
+  printf "${_bd}│${_rs} ${_lb}remote-host:${_rs} ${_vl}%-84s${_rs}${_bd}│${_rs}\n" "$rh_disp"
+  printf "${_bd}├%s┬%s┬%s┬%s┤${_rs}\n" "$_d32" "$_d22" "$_d21" "$_d20"
+  printf "${_bd}│${_rs} ${_lb}remote-is:${_rs} ${_vl}%-20s${_rs}${_bd}│${_rs} ${_lb}ssh-port:${_rs} ${_vl}%-11s${_rs}${_bd}│${_rs} ${_lb}dry-run:${_rs} ${_vl}%-11s${_rs}${_bd}│${_rs} ${_lb}verbose:${_rs} ${_vl}%-10s${_rs}${_bd}│${_rs}\n" \
+    "${remote_is:-(local)}" "$ssh_port" "$dry_run" "$verbose"
+  printf "${_bd}└%s┴%s┴%s┴%s┘${_rs}\n" "$_d32" "$_d22" "$_d21" "$_d20"
+  printf '\n'
+
   # Reserve display space for the status table
   local i; for (( i = 0; i < total; i++ )); do printf '\n'; done
 
@@ -282,20 +315,20 @@ BANNER
         RUNNING)
           local disp="${f5:--}"
           [ "${#disp}" -gt 28 ] && disp="…${disp: -27}"
-          printf '  %-14s  ▶   %-4s  %-8s  %-12s  %s\033[K\n' \
+          printf "  %-14s  ${_c_run}▶${_rs}     %-4s  %-8s  %-12s  %s\033[K\n" \
             "$lbl" "$attempt" "${f3:----}" "${f4:------}" "$disp"
           ;;
         RETRYING)
           local remaining=$(( ${f3:-0} - $(date +%s) ))
           [ "$remaining" -lt 0 ] && remaining=0
-          printf '  %-14s  ⟳   %-4s  retrying in %ds  (attempt %s/%s, exit %s)\033[K\n' \
+          printf "  %-14s  ${_c_ret}⟳${_rs}     %-4s  retrying in %ds  (attempt %s/%s, exit %s)\033[K\n" \
             "$lbl" "$attempt" "$remaining" "$attempt" "$max_retries" "${f4:--}"
           ;;
         DONE)
-          printf '  %-14s  ✓   %-4s  completed\033[K\n' "$lbl" "$attempt"
+          printf "  %-14s  ${_c_don}✓${_rs}     %-4s  completed\033[K\n" "$lbl" "$attempt"
           ;;
         FAILED)
-          printf '  %-14s  ✗   %-4s  failed (exit %s)\033[K\n' "$lbl" "$attempt" "$f3"
+          printf "  %-14s  ${_c_err}✗${_rs}     %-4s  failed (exit %s)\033[K\n" "$lbl" "$attempt" "$f3"
           ;;
         *)
           printf '  %-14s  ·        waiting\033[K\n' "$lbl"
@@ -386,7 +419,7 @@ run_set() {
       printf '%s\n' "$?" > "$rsync_exit_tmp"
     } | _cr_to_lf | while IFS= read -r line; do
       # Progress line: "   1,234,567  45%   2.34MB/s    0:00:15 (xfr#5, to-chk=42/100)"
-      if [[ "$line" =~ ^[[:space:]]+[0-9,]+[[:space:]]+([0-9]+)%[[:space:]]+([0-9.]+[kKMGTP]?B/s) ]]; then
+      if [[ "$line" =~ ^[[:space:]]+[^[:space:]]+[[:space:]]+([0-9]+)%[[:space:]]+([0-9.]+[kKMGTP]?B/s) ]]; then
         local cf; cf=$(cat "$curfile_tmp" 2>/dev/null || printf '%s' '-')
         printf 'RUNNING|%s|%s%%|%s|%s\n' \
           "$((attempt + 1))" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${cf//|/?}" \
@@ -487,6 +520,8 @@ done
 
 kill "$display_pid" 2>/dev/null || true
 wait "$display_pid" 2>/dev/null || true
+rm -f "$working_directory/loop/"*-STATUS 2>/dev/null || true
+rmdir "$working_directory/loop" 2>/dev/null || true
 
 if [ "$exit_code" -eq 0 ]; then
   echo "All sets completed successfully."
