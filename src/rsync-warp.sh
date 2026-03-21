@@ -190,11 +190,15 @@ if [ -f "$working_directory/skip-compress.txt" ]; then
   skip_compress="${skip_compress%/}"
 fi
 
+# Override the local rsync binary path. Leave empty to use 'rsync' from PATH.
+# Set to /usr/bin/rsync for Synology NAS or any local machine where rsync is not in the default PATH.
+rsync_local_path="${RSYNC_LOCAL_PATH:-rsync}"
+
 # Override the remote rsync binary path. Leave empty to rely on the remote's PATH.
 # Set to /usr/bin/rsync for Synology NAS or any remote where rsync is not in the default SSH PATH.
 rsync_remote_path="${RSYNC_REMOTE_PATH:-}"
 
-rsync_base=(rsync -avzh --delete --whole-file --partial-dir=.rsync-partial --timeout=20 --exclude-from="$working_directory/exclude-files.txt" --modify-window=1 --info=progress2 --no-motd --numeric-ids --stats)
+rsync_base=("$rsync_local_path" -avzh --delete --whole-file --partial-dir=.rsync-partial --timeout=20 --exclude-from="$working_directory/exclude-files.txt" --modify-window=1 --info=progress2 --no-motd --numeric-ids --stats)
 [ -n "$rsync_remote_path" ] && rsync_base+=(--rsync-path="$rsync_remote_path")
 [ -n "$skip_compress" ] && rsync_base+=("--skip-compress=$skip_compress")
 

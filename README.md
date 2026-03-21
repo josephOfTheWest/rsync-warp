@@ -37,7 +37,7 @@ A Bash wrapper around `rsync` that optimizes and controls file transfers between
 ## Requirements
 
 - **Bash** 4.0 or later (uses arrays and `${var,,}` case folding)
-- **rsync** installed on both local and remote machines. If the remote rsync is not in the default SSH PATH (e.g. Synology NAS), set `RSYNC_REMOTE_PATH=/usr/bin/rsync` — see [Customization](#customization)
+- **rsync** installed on both local and remote machines. If rsync is not in the default PATH on either side (e.g. Synology NAS), set `RSYNC_LOCAL_PATH` or `RSYNC_REMOTE_PATH` — see [Customization](#customization)
 - **SSH** access to the remote host with key-based authentication
 - **setsid** available (standard on Linux; used to isolate rsync from SIGINT)
 
@@ -444,6 +444,7 @@ All tunable values are near the top of `run_set` and at the `rsync_base`/`ssh_op
 
 | Setting | Location | Default | Notes |
 |---------|----------|---------|-------|
+| Local rsync binary path | `RSYNC_LOCAL_PATH` env var | `rsync` | Set to `/usr/bin/rsync` when the local machine's PATH does not include rsync (e.g. running on a Synology NAS) |
 | Remote rsync binary path | `RSYNC_REMOTE_PATH` env var | _(empty — use remote PATH)_ | Set to `/usr/bin/rsync` when the remote's SSH PATH does not include rsync (e.g. Synology NAS) |
 | SSH port | `ssh-port` argument | `22` | Pass as the 4th positional argument; pass `""` for default |
 | Verbose/diagnostic mode | `verbose` argument | `false` | Pass as the 6th positional argument; pass `true` to enable pre-flight checks and increased rsync logging |
@@ -487,18 +488,27 @@ Transient errors are retried automatically with exponential backoff. Permanent e
 ---
 
 **rsync fails with exit code 12 against a Synology NAS (or similar appliance)**
-The remote SSH session may not include `/usr/bin` in its PATH, causing rsync to fail when starting the remote protocol handshake. Set the `RSYNC_REMOTE_PATH` environment variable to the full path of rsync on the remote:
+The SSH session may not include `/usr/bin` in its PATH, causing rsync to fail when starting the remote protocol handshake. Use `RSYNC_REMOTE_PATH` when the remote is a Synology, or `RSYNC_LOCAL_PATH` when the local machine is a Synology:
 ```bash
+# Remote is Synology
 export RSYNC_REMOTE_PATH=/usr/bin/rsync
 bash src/rsync-warp.sh nas.example.com target /var/rsync-warp "" "" false mydata /data /backup
+
+# Local machine is Synology
+export RSYNC_LOCAL_PATH=/usr/bin/rsync
+bash src/rsync-warp.sh remote.example.com target /var/rsync-warp "" "" false mydata /data /backup
 ```
-Or inline it for a single run:
+Or inline for a single run:
 ```bash
 RSYNC_REMOTE_PATH=/usr/bin/rsync bash src/rsync-warp.sh ...
+RSYNC_LOCAL_PATH=/usr/bin/rsync bash src/rsync-warp.sh ...
 ```
-To verify the correct path, run:
+To verify the correct path on either side, run:
 ```bash
+# Remote
 ssh -p 22 user@nas.example.com "which rsync || command -v rsync"
+# Local
+which rsync || command -v rsync
 ```
 
 **rsync fails immediately with exit code 255**
