@@ -52,11 +52,11 @@ if [ "$#" -eq 1 ] && [ "$1" = "--status" ]; then
     exit 1
   fi
   echo "rsync-warp running: pid=$pid"
-  ps -o pid,stat,cmd -p "$pid"
+  ps -p "$pid"
   exit 0
 fi
 
-if [ "$#" -lt 7 ]; then
+if [ "$#" -lt 9 ]; then
   echo "ERROR: insufficient arguments"
   usage
   exit 1
@@ -104,8 +104,19 @@ case "${verbose,,}" in
     ;;
 esac
 
+if ! [[ "$ssh_port" =~ ^[0-9]+$ ]] || [ "$ssh_port" -lt 1 ] || [ "$ssh_port" -gt 65535 ]; then
+  echo "ERROR: ssh-port must be a number between 1 and 65535 (got: '$ssh_port')"
+  usage
+  exit 1
+fi
+
 if [ -z "$working_directory" ]; then
   working_directory="$(pwd)"
+fi
+
+if [ ! -f "$working_directory/exclude-files.txt" ]; then
+  echo "ERROR: exclude-files.txt not found in $working_directory"
+  exit 1
 fi
 
 stop_all=0
@@ -156,13 +167,15 @@ if [ "$set_count" -le 0 ]; then
   exit 1
 fi
 
-echo "Remote Host: ${remote_host:-local}"
-echo "Remote Is:   ${remote_is:-local}"
-echo "SSH Port:    $ssh_port"
-echo "Working Dir: $working_directory"
-echo "Dry Run:     $dry_run"
-echo "Verbose:     $verbose"
-echo "Set Count:   $set_count"
+declare -A _seen_labels
+for _lbl in "${labels[@]}"; do
+  if [ -n "${_seen_labels[$_lbl]+x}" ]; then
+    echo "ERROR: duplicate label '$_lbl' — each label must be unique"
+    exit 1
+  fi
+  _seen_labels[$_lbl]=1
+done
+unset _seen_labels _lbl
 
 mkdir -p "$working_directory/loop" "$working_directory/rsynclogs"
 
@@ -185,7 +198,8 @@ rsync_base=(rsync -avzh --delete --whole-file --partial-dir=.rsync-partial --tim
 [ -n "$rsync_remote_path" ] && rsync_base+=(--rsync-path="$rsync_remote_path")
 [ -n "$skip_compress" ] && rsync_base+=("--skip-compress=$skip_compress")
 
-ssh_opts="ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -p $ssh_port -o ControlMaster=auto -o ControlPath=/tmp/rsync-warp-%r@%h:%p -o ControlPersist=60"
+ssh_control_path="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/rsync-warp-%r@%h:%p"
+ssh_opts="ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -p $ssh_port -o ControlMaster=auto -o ControlPath=$ssh_control_path -o ControlPersist=60"
 
 max_retries=10
 
@@ -331,7 +345,7 @@ BANNER
           printf "  %-14s  ${_c_err}✗${_rs}     %-4s  failed (exit %s)\033[K\n" "$lbl" "$attempt" "$f3"
           ;;
         *)
-          printf '  %-14s  ·        waiting\033[K\n' "$lbl"
+          printf '  %-14s  ·     waiting\033[K\n' "$lbl"
           ;;
       esac
     done
@@ -383,12 +397,6 @@ run_set() {
   fi
 
   while true; do
-    if [ "${stop_all:-0}" -eq 1 ]; then
-      echo "Signal: stop_all=1; canceling $label" >> "$LOG_FILE"
-      printf 'FAILED|%s|stopped||\n' "$attempt" > "$status_file"
-      return 1
-    fi
-
     if [ -f "$STOPALLFILE" ]; then
       echo "STOPALL file exists: canceling $label" >> "$LOG_FILE"
       printf 'FAILED|%s|stopped||\n' "$attempt" > "$status_file"
@@ -407,7 +415,7 @@ run_set() {
     local rsync_exit_tmp="$working_directory/loop/${label}-exitcode"
     local rsync_cmd
     rsync_cmd=("${rsync_base[@]}" ${dry_run_flag:+"$dry_run_flag"} -e "$ssh_opts" --log-file="$LOG_FILE" "$rsync_src" "$rsync_dst")
-    [ "${verbose,,}" = "true" ] && rsync_cmd+=("--verbose" "--verbose")
+    [ "${verbose,,}" = "true" ] && rsync_cmd+=("--verbose")
 
     # Run rsync piped through a progress parser that updates the status file.
     # tr converts \r (used by --info=progress2) to \n for line-by-line reading.
@@ -426,7 +434,7 @@ run_set() {
           > "$status_file"
       # Filename line: non-empty, starts with non-space, not a stats/message line
       elif [[ -n "$line" ]] && [[ "$line" =~ ^[^[:space:]] ]] && \
-           ! [[ "$line" =~ ^(sent\ |received\ |total\ |Number\ |File\ list|Literal|Matched|creating\ |rsync:\ |building|delta-|sending\ incremental|done\ count|created\ dir|opening\ connection|\.[cdLDS]) ]]; then
+           ! [[ "$line" =~ ^(sent\ |received\ |total\ |Total\ |Number\ |File\ list|Literal|Matched|creating\ |rsync:\ |building|delta-|sending\ incremental|done\ count|created\ dir|opening\ connection|\.[cdLDS]) ]]; then
         printf '%s\n' "$line" > "$curfile_tmp"
         printf 'RUNNING|%s|---|---|%s\n' "$((attempt + 1))" "${line:0:100}" > "$status_file"
       fi
@@ -464,7 +472,7 @@ run_set() {
         # Close any stale ControlMaster socket so the next attempt opens a fresh connection
         local ctrl_host="${source_host:-$target_host}"
         if [ -n "$ctrl_host" ]; then
-          ssh -O exit -o "ControlPath=/tmp/rsync-warp-%r@%h:%p" -p "$ssh_port" "$ctrl_host" 2>/dev/null || true
+          ssh -O exit -o "ControlPath=$ssh_control_path" -p "$ssh_port" "$ctrl_host" 2>/dev/null || true
         fi
         if [ "${verbose,,}" = "true" ]; then
           preflight_check "$LOG_FILE" "$source_host" "$src_path" "source" >/dev/null
@@ -501,8 +509,6 @@ run_set() {
     esac
   done
 }
-
-cd "$working_directory"
 
 display_loop &
 display_pid=$!
