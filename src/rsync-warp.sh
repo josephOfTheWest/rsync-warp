@@ -262,7 +262,14 @@ display_loop() {
   local n="${#labels[@]}"
   local total=$(( n + 4 ))  # header + top separator + column headers + n sets + bottom separator
   local start_time; start_time=$(date +%s)
-  local sep; sep=$(printf '─%.0s' $(seq 1 72))
+  # Match the static param tables above, which are hardcoded to 100 chars wide.
+  local term_cols=100
+  # Fixed visible chars before the two file columns: 2+10+2+1+5+4+2+8+2+12+2 = 50, plus 2 between them
+  local _file_avail=$(( term_cols - 52 ))
+  local _name_w=$(( _file_avail / 3 ))
+  [ "$_name_w" -lt 12 ] && _name_w=12  # must fit "CURRENT FILE" header without overflowing
+  local _path_w=$(( _file_avail - _name_w ))
+  local sep; sep=$(printf '─%.0s' $(seq 1 "$term_cols"))
 
   # Clear screen and print fixed ASCII art banner above the status table
   printf '\033[2J\033[H'
@@ -307,6 +314,28 @@ BANNER
     "${remote_is:-(local)}" "$ssh_port" "$dry_run" "$verbose"
   printf "${_bd}└%s┴%s┴%s┴%s┘${_rs}\n" "$_d32" "$_d22" "$_d21" "$_d20"
   printf '\n'
+  printf ' rsync-warp  ●  %d set(s)\n' "$n"
+  printf '\n'
+
+  local _d12; _d12=$(printf '─%.0s' $(seq 1 12))
+  local _d42; _d42=$(printf '─%.0s' $(seq 1 42))
+  printf "${_bd}┌%s┬%s┬%s┐${_rs}\n" "$_d12" "$_d42" "$_d42"
+  printf "${_bd}│${_rs} ${_lb}%-10s${_rs} ${_bd}│${_rs} ${_lb}%-40s${_rs} ${_bd}│${_rs} ${_lb}%-40s${_rs} ${_bd}│${_rs}\n" \
+    "LABEL" "SOURCE PATH" "TARGET PATH"
+  printf "${_bd}├%s┼%s┼%s┤${_rs}\n" "$_d12" "$_d42" "$_d42"
+  local _si
+  for _si in "${!labels[@]}"; do
+    local _lbl_s="${labels[$_si]}"
+    local _sp="${source_paths[$_si]}"
+    local _tp="${target_paths[$_si]}"
+    [ "${#_lbl_s}" -gt 10 ] && _lbl_s="${_lbl_s:0:9}…"
+    [ "${#_sp}" -gt 40 ] && _sp="${_sp:0:39}…"
+    [ "${#_tp}" -gt 40 ] && _tp="${_tp:0:39}…"
+    printf "${_bd}│${_rs} ${_vl}%-10s${_rs} ${_bd}│${_rs} ${_vl}%-40s${_rs} ${_bd}│${_rs} ${_vl}%-40s${_rs} ${_bd}│${_rs}\n" \
+      "$_lbl_s" "$_sp" "$_tp"
+  done
+  printf "${_bd}└%s┴%s┴%s┘${_rs}\n" "$_d12" "$_d42" "$_d42"
+  printf '\n'
 
   # Reserve display space for the status table
   local i; for (( i = 0; i < total; i++ )); do printf '\n'; done
@@ -315,41 +344,56 @@ BANNER
     printf '\033[%dA' "$total"  # move cursor back to top of display area
 
     local elapsed=$(( $(date +%s) - start_time ))
-    printf ' rsync-warp  ●  %d set(s)  ·  elapsed %02d:%02d\033[K\n' \
-      "$n" "$(( elapsed / 60 ))" "$(( elapsed % 60 ))"
+    printf ' elapsed %02d:%02d\033[K\n' \
+      "$(( elapsed / 60 ))" "$(( elapsed % 60 ))"
     printf '%s\033[K\n' "$sep"
     # Column headers — SET% is overall bytes transferred across the whole set, not per-file
-    printf '  %-14s  %-4s  %-4s  %-8s  %-12s  %s\033[K\n' \
-      "LABEL" "ST" "ATT" "SET %" "SPEED" "CURRENT FILE"
+    printf "  %-10s  %-4s  %-4s  %-8s  %-12s  %-*s  %s\033[K\n" \
+      "LABEL" "ST" "ATT" "SET %" "SPEED" "$_name_w" "CURRENT FILE" "PATH"
 
     local idx
     for idx in "${!labels[@]}"; do
       local lbl="${labels[$idx]}"
+      local lbl_disp="$lbl"
+      [ "${#lbl_disp}" -gt 10 ] && lbl_disp="${lbl_disp:0:9}…"
       local sf="$working_directory/loop/${lbl}-STATUS"
       local state="" attempt="" f3="" f4="" f5=""
       [ -f "$sf" ] && IFS='|' read -r state attempt f3 f4 f5 < "$sf" || true
 
       case "${state:-WAITING}" in
         RUNNING)
-          local disp="${f5:--}"
-          [ "${#disp}" -gt 28 ] && disp="…${disp: -27}"
-          printf "  %-14s  ${_c_run}▶${_rs}     %-4s  %-8s  %-12s  %s\033[K\n" \
-            "$lbl" "$attempt" "${f3:----}" "${f4:------}" "$disp"
+          local fname fdir
+          if [ -z "$f5" ] || [ "$f5" = "-" ]; then
+            fname="-"; fdir=""
+          else
+            fname="${f5##*/}"
+            fdir="${f5%/*}"; [ "$fdir" = "$f5" ] && fdir=""
+            # When source-path has no trailing slash, rsync prefixes paths with the
+            # source directory name (e.g. "photos/subdir/file"). Strip that prefix
+            # since the source dir is already visible in the static sets table above.
+            local _src_base="${source_paths[$idx]%/}"; _src_base="${_src_base##*/}"
+            [ "$fdir" = "$_src_base" ] && fdir=""
+            [[ "$fdir" == "$_src_base/"* ]] && fdir="${fdir#"$_src_base/"}"
+          fi
+          [ "${#fname}" -gt "$_name_w" ] && fname="${fname:0:$(( _name_w - 1 ))}…"
+          [ "${#fdir}" -gt "$_path_w" ] && fdir="${fdir:0:$(( _path_w - 1 ))}…"
+          printf "  %-10s  ${_c_run}▶${_rs}     %-4s  %-8s  %-12s  %-*s  %s\033[K\n" \
+            "$lbl_disp" "$attempt" "${f3:----}" "${f4:------}" "$_name_w" "$fname" "$fdir"
           ;;
         RETRYING)
           local remaining=$(( ${f3:-0} - $(date +%s) ))
           [ "$remaining" -lt 0 ] && remaining=0
-          printf "  %-14s  ${_c_ret}⟳${_rs}     %-4s  retrying in %ds  (attempt %s/%s, exit %s)\033[K\n" \
-            "$lbl" "$attempt" "$remaining" "$attempt" "$max_retries" "${f4:--}"
+          printf "  %-10s  ${_c_ret}⟳${_rs}     %-4s  retrying in %ds  (attempt %s/%s, exit %s)\033[K\n" \
+            "$lbl_disp" "$attempt" "$remaining" "$attempt" "$max_retries" "${f4:--}"
           ;;
         DONE)
-          printf "  %-14s  ${_c_don}✓${_rs}     %-4s  completed\033[K\n" "$lbl" "$attempt"
+          printf "  %-10s  ${_c_don}✓${_rs}     %-4s  completed\033[K\n" "$lbl_disp" "$attempt"
           ;;
         FAILED)
-          printf "  %-14s  ${_c_err}✗${_rs}     %-4s  failed (exit %s)\033[K\n" "$lbl" "$attempt" "$f3"
+          printf "  %-10s  ${_c_err}✗${_rs}     %-4s  failed (exit %s)\033[K\n" "$lbl_disp" "$attempt" "$f3"
           ;;
         *)
-          printf '  %-14s  ·     waiting\033[K\n' "$lbl"
+          printf '  %-10s  ·     waiting\033[K\n' "$lbl_disp"
           ;;
       esac
     done

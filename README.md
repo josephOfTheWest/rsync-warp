@@ -246,6 +246,19 @@ bash src/rsync-warp.sh <remote-host> <remote-is> <working-dir> <ssh-port> <dry-r
 - Default values apply when `""` is passed for `working-dir`, `ssh-port`, `dry-run`, or `verbose`.
 - When `remote-host` is `""`, `remote-is` is ignored and the transfer runs locally.
 
+**Trailing slashes on source-path and target-path**
+
+rsync treats a trailing slash on the source path as a meaningful directive — its presence or absence changes *what* gets transferred:
+
+| source-path | Effect |
+|-------------|--------|
+| `/data/photos` | Transfers the `photos` directory itself into the target, resulting in `<target>/photos/…` |
+| `/data/photos/` | Transfers the *contents* of `photos` directly into the target, resulting in `<target>/file1`, `<target>/file2`, … |
+
+A trailing slash on `target-path` has no effect — rsync always writes into the target directory regardless.
+
+In practice, omitting the trailing slash from `source-path` is usually the safer default: it preserves the top-level directory name at the destination and makes the transfer easier to reason about. Add a trailing slash only when you explicitly want to merge the source contents directly into an existing target directory.
+
 Multiple `label source-path target-path` groups can be appended to run several sets in one invocation. All sets run in parallel.
 
 ---
