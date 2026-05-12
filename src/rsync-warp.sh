@@ -267,6 +267,55 @@ preflight_check() {
   echo "--- end preflight $direction ---" | tee -a "$log_file"
 }
 
+# Counts files in the source tree so the progress display has a stable denominator.
+# rsync's own file counter (ir-chk=N/M) has a growing M during the scan phase; using
+# a pre-counted total from find gives a fixed number from the start.
+# Simple name patterns from the rsync exclude-from file are applied; directory-anchored
+# patterns (containing '/') and include rules ('+') are skipped — translating the full
+# rsync filter syntax to find is out of scope, so the count may be slightly high when
+# those more complex rules are in use.
+# Args: <host-or-empty> <path> <port> <exclude-file>
+# Prints the count to stdout; prints 0 on any error.
+count_source_files() {
+  local host="$1" path="$2" port="$3" exclude_file="$4"
+
+  local -a name_excl=()
+  if [ -f "$exclude_file" ]; then
+    local rule
+    while IFS= read -r rule || [ -n "$rule" ]; do
+      [[ -z "${rule//[[:space:]]/}" ]]             && continue  # empty / whitespace-only
+      [[ "$rule" =~ ^[[:space:]]*# ]]              && continue  # comment
+      [[ "$rule" =~ ^[[:space:]]*\+[[:space:]] ]]  && continue  # include rule — skip
+      rule="${rule#- }"                                          # strip "- " exclude prefix
+      rule="${rule#"${rule%%[![:space:]]*}"}"                    # strip leading whitespace
+      [ -z "$rule" ] && continue
+      [[ "$rule" == */* ]] && continue                          # dir-anchored — skip
+      name_excl+=("$rule")
+    done < "$exclude_file"
+  fi
+
+  local count=0
+  if [ -n "$host" ]; then
+    local cmd; cmd="find $(printf '%q' "$path") -type f"
+    local p; for p in "${name_excl[@]}"; do
+      cmd+=" -not -name $(printf '%q' "$p")"
+    done
+    cmd+=" 2>/dev/null | wc -l"
+    count=$(ssh -p "$port" -o BatchMode=yes \
+      -o ControlMaster=auto -o "ControlPath=$ssh_control_path" -o ControlPersist=60 \
+      -o ConnectTimeout=15 "$host" "$cmd" 2>/dev/null) || true
+  else
+    local -a find_args=("$path" -type f)
+    local p; for p in "${name_excl[@]}"; do
+      find_args+=(-not -name "$p")
+    done
+    count=$(find "${find_args[@]}" 2>/dev/null | wc -l) || true
+  fi
+
+  count="${count//[[:space:]]/}"     # wc -l pads with leading spaces on some platforms
+  printf '%d\n' "${count:-0}" 2>/dev/null || printf '0\n'
+}
+
 # Renders a live per-set status table, refreshing every second using ANSI cursor movement.
 # Reads <working-dir>/loop/<label>-STATUS files written by run_set.
 # Status file format (pipe-delimited, always 5 fields / 4 pipes):
@@ -492,6 +541,22 @@ run_set() {
     preflight_check "$LOG_FILE" "$target_host" "$dst_path" "target" >/dev/null
   fi
 
+  # Count source files once before the retry loop so the progress display has a
+  # stable denominator throughout the transfer (rsync's own M in ir-chk=N/M grows
+  # during the scan phase, making the percentage appear to shrink).
+  local file_total=0
+  local _cnt_path
+  if [ -n "$source_host" ]; then
+    _cnt_path="$src_path"
+  elif [[ "$src_path" == /* ]]; then
+    _cnt_path="$src_path"
+  else
+    _cnt_path="$working_directory/$src_path"
+  fi
+  file_total=$(count_source_files "${source_host:-}" "$_cnt_path" \
+    "$ssh_port" "$working_directory/exclude-files.txt") || file_total=0
+  echo "source file count: $file_total" >> "$LOG_FILE"
+
   while true; do
     if [ -f "$STOPALLFILE" ]; then
       echo "STOPALL file exists: canceling $label" >> "$LOG_FILE"
@@ -528,21 +593,21 @@ run_set() {
         local cf; cf=$(cat "$curfile_tmp" 2>/dev/null || printf '%s' '-')
         local pct="${BASH_REMATCH[1]}" speed="${BASH_REMATCH[2]}"
         local progress
-        # Prefer file-count progress from rsync's file counter (remaining / total).
-        # rsync uses two counter names depending on phase:
-        #   ir-chk=N/M  incremental recursion scan (rsync is still discovering files)
-        #   to-chk=N/M  transfer phase (rsync is transferring/checking files)
-        # Both show files remaining / total, so we match either.
-        # Note: the denominator grows during the ir-chk scan phase, so early totals
-        # may jump (e.g. 5/50 → 5/2000) until scanning finishes.
-        # During to-chk, rsync only prints the counter on the final (100%) line of
-        # each file; intermediate byte-level updates have no counter. We cache the
-        # last known file count in _last_file_progress (persists across loop
-        # iterations inside the subshell) and display it for those intermediate lines
-        # so the FILES column stays stable instead of reverting to 0%.
+        # Track file-count progress from rsync's ir-chk / to-chk counters.
+        #   ir-chk=N/M  scan phase: N files remaining to discover, M total found so far
+        #   to-chk=N/M  transfer phase: N files remaining to transfer/verify, M total
+        # files_done = M - N (files processed so far in either phase).
+        # file_total is pre-counted by find before rsync started, giving a stable
+        # denominator that doesn't grow as rsync discovers more files during ir-chk.
+        # Falls back to rsync's own M if find returned 0 (e.g. permission error).
+        # During to-chk, the counter only appears on the final (100%) line of each
+        # file; intermediate byte-level updates have no counter. We cache the last
+        # known count in _last_file_progress so the column stays stable instead of
+        # reverting to byte-percentage between counter updates.
         if [[ "$line" =~ (to-chk|ir-chk)=([0-9]+)/([0-9]+) ]]; then
           local files_done=$(( ${BASH_REMATCH[3]} - ${BASH_REMATCH[2]} ))
-          _last_file_progress="${files_done}/${BASH_REMATCH[3]}"
+          local denom; denom=$(( file_total > 0 ? file_total : ${BASH_REMATCH[3]} ))
+          _last_file_progress="${files_done}/${denom}"
           progress="$_last_file_progress"
         else
           progress="${_last_file_progress:-${pct}%}"
