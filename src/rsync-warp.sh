@@ -535,12 +535,17 @@ run_set() {
         # Both show files remaining / total, so we match either.
         # Note: the denominator grows during the ir-chk scan phase, so early totals
         # may jump (e.g. 5/50 → 5/2000) until scanning finishes.
-        # Falls back to byte percentage when neither is present (older rsync builds).
+        # During to-chk, rsync only prints the counter on the final (100%) line of
+        # each file; intermediate byte-level updates have no counter. We cache the
+        # last known file count in _last_file_progress (persists across loop
+        # iterations inside the subshell) and display it for those intermediate lines
+        # so the FILES column stays stable instead of reverting to 0%.
         if [[ "$line" =~ (to-chk|ir-chk)=([0-9]+)/([0-9]+) ]]; then
           local files_done=$(( ${BASH_REMATCH[3]} - ${BASH_REMATCH[2]} ))
-          progress="${files_done}/${BASH_REMATCH[3]}"
+          _last_file_progress="${files_done}/${BASH_REMATCH[3]}"
+          progress="$_last_file_progress"
         else
-          progress="${pct}%"
+          progress="${_last_file_progress:-${pct}%}"
         fi
         # Filenames containing '|' (valid on Unix) are sanitised with '?' to protect
         # the pipe-delimited status file format; display only — no data is lost.
