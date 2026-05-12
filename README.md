@@ -237,7 +237,7 @@ bash src/rsync-warp.sh <remote-host> <remote-is> <working-dir> <ssh-port> <dry-r
 | `ssh-port` | SSH port for the remote host. Pass `""` to use the default (`22`) |
 | `dry-run` | `true` to simulate the transfer without writing files; `false` for a live run. Default: `false` |
 | `verbose` | `true` enables pre-flight SSH/path checks and increased rsync log detail. Default: `false` |
-| `label` | Unique name for this transfer set. Used for log file names and run-control files |
+| `label` | Unique name for this transfer set. Used for log file names and run-control files. Only letters, numbers, hyphens, and underscores are allowed |
 | `source-path` | Path to sync from. Absolute if starting with `/`; otherwise relative to `working-dir` |
 | `target-path` | Path to sync to. Absolute if starting with `/`; otherwise relative to `working-dir` |
 
@@ -387,6 +387,8 @@ Each transfer set writes a single log file for the entire session (including all
 
 Each log includes per-file transfer details (`--info=progress2`), a transfer summary with byte counts and rates (`--stats`), and success/failure markers between attempts.
 
+Log files older than 30 days are automatically deleted each time rsync-warp starts.
+
 ### Run Control Files
 
 rsync-warp uses files in `<working-dir>/loop/` to control execution:
@@ -406,7 +408,7 @@ rsync-warp uses files in `<working-dir>/loop/` to control execution:
 bash src/rsync-warp.sh --status
 ```
 
-Prints the PID and process state if rsync-warp is running, or exits with code 1 if it is not.
+Prints the PID and process state if rsync-warp is running, or exits with code 1 if it is not. If multiple instances are running (e.g. for different working directories), the PID of one of them is shown — use `pgrep -a -f rsync-warp.sh` to list all.
 
 ### Stop All Sets
 
@@ -464,7 +466,7 @@ All tunable values are near the top of `run_set` and at the `rsync_base`/`ssh_op
 | Dry run | `dry-run` argument | `false` | Pass as the 5th positional argument; pass `true` to simulate without writing files |
 | Max retries | `max_retries` | `10` | Number of retry attempts per set |
 | Initial retry delay | `base_delay` | `5` seconds | Doubles after each failure, capped at 300 s |
-| Transfer timeout | `rsync_base` | `20` seconds | rsync `--timeout` value |
+| Transfer timeout | `rsync_base` | `120` seconds | rsync `--timeout` idle-data value — triggers a retry if no bytes are received for this long |
 | Modify window | `rsync_base` | `1` second | Timestamp tolerance (`--modify-window`) |
 
 ---
@@ -551,7 +553,7 @@ Sets will refuse to start while this file exists.
 rsync exits with code 11. This is treated as a permanent (non-retryable) failure. Free space on the remote and re-run.
 
 **Log directory filling up**
-Each invocation creates one log file per set. Prune old logs with:
+Log files older than 30 days are pruned automatically on each startup. To prune manually:
 ```bash
 find /var/rsync-warp/rsynclogs -name "*.txt" -mtime +30 -delete
 ```

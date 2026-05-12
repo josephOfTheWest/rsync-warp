@@ -45,6 +45,8 @@ Examples:
 EOF
 }
 
+# Note: if multiple instances are running (different working dirs), --status reports
+# an arbitrary one — pgrep returns whichever PID comes first in the process table.
 if [ "$#" -eq 1 ] && [ "$1" = "--status" ]; then
   pid=$(pgrep -f "[r]sync-warp.sh" | head -n 1) || true
   if [ -z "$pid" ]; then
@@ -133,11 +135,17 @@ cleanup() {
       dst_path="${target_paths[$idx]}"
       if [ -z "$target_host" ]; then
         [[ "$dst_path" != /* ]] && dst_path="$working_directory/$dst_path"
-        find "$dst_path" -name ".rsync-partial" -type d -exec rm -rf {} + 2>/dev/null || true
+        # Guard: skip obviously dangerous or empty paths before running rm -rf via find
+        if [ -n "$dst_path" ] && [ "$dst_path" != "/" ]; then
+          find "$dst_path" -name ".rsync-partial" -type d -exec rm -rf {} + 2>/dev/null || true
+        fi
       fi
     done
 
     rm -f "$working_directory/loop/"*-PROCEED 2>/dev/null || true
+    rm -f "$working_directory/loop/"*-STATUS.tmp 2>/dev/null || true
+    rm -f "$working_directory/loop/"*-curfile 2>/dev/null || true
+    rm -f "$working_directory/loop/"*-exitcode 2>/dev/null || true
     rm -f "$STOPALLFILE" 2>/dev/null || true
     rmdir "$working_directory/loop" 2>/dev/null || true
   fi
@@ -169,6 +177,10 @@ fi
 
 declare -A _seen_labels
 for _lbl in "${labels[@]}"; do
+  if ! [[ "$_lbl" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "ERROR: label '$_lbl' — only letters, numbers, hyphens, and underscores are allowed"
+    exit 1
+  fi
   if [ -n "${_seen_labels[$_lbl]+x}" ]; then
     echo "ERROR: duplicate label '$_lbl' — each label must be unique"
     exit 1
@@ -178,6 +190,9 @@ done
 unset _seen_labels _lbl
 
 mkdir -p "$working_directory/loop" "$working_directory/rsynclogs"
+
+# Prune log files older than 30 days to prevent unbounded accumulation.
+find "$working_directory/rsynclogs" -name "*.txt" -mtime +30 -delete 2>/dev/null || true
 
 for idx in "${!labels[@]}"; do
   proceed="${working_directory}/loop/${labels[$idx]}-PROCEED"
@@ -198,7 +213,10 @@ rsync_local_path="${RSYNC_LOCAL_PATH:-rsync}"
 # Set to /usr/bin/rsync for Synology NAS or any remote where rsync is not in the default SSH PATH.
 rsync_remote_path="${RSYNC_REMOTE_PATH:-}"
 
-rsync_base=("$rsync_local_path" -avzh --delete --whole-file --partial-dir=.rsync-partial --timeout=20 --exclude-from="$working_directory/exclude-files.txt" --modify-window=1 --info=progress2 --no-motd --numeric-ids --stats)
+# --timeout=120: idle-data timeout (no bytes received for 120 s triggers retry).
+# --log-file is intentionally NOT here; it is appended per-invocation in run_set so
+# each set writes to its own dated log file rather than a shared one.
+rsync_base=("$rsync_local_path" -avzh --delete --whole-file --partial-dir=.rsync-partial --timeout=120 --exclude-from="$working_directory/exclude-files.txt" --modify-window=1 --info=progress2 --no-motd --numeric-ids --stats)
 [ -n "$rsync_remote_path" ] && rsync_base+=(--rsync-path="$rsync_remote_path")
 [ -n "$skip_compress" ] && rsync_base+=("--skip-compress=$skip_compress")
 
@@ -235,7 +253,9 @@ preflight_check() {
       echo "[SSH] remote rsync version:" | tee -a "$log_file"
       ssh -p "$ssh_port" "$host" "rsync --version 2>&1 | head -1" 2>&1 | tee -a "$log_file" || true
       echo "[$direction] path check: $path" | tee -a "$log_file"
-      ssh -p "$ssh_port" "$host" "ls -lad \"$path\" 2>&1" 2>&1 | tee -a "$log_file" || true
+      # printf '%q' shell-quotes $path so remote metacharacters can't cause injection.
+      local path_q; path_q=$(printf '%q' "$path")
+      ssh -p "$ssh_port" "$host" "ls -lad $path_q 2>&1" 2>&1 | tee -a "$log_file" || true
     else
       echo "[SSH] connection FAILED to $host" | tee -a "$log_file"
     fi
@@ -251,7 +271,8 @@ preflight_check() {
 # Reads <working-dir>/loop/<label>-STATUS files written by run_set.
 # Status file format (pipe-delimited, always 5 fields / 4 pipes):
 #   WAITING|0||||
-#   RUNNING|<attempt>|<pct>|<speed>|<current-file>
+#   RUNNING|<attempt>|<progress>|<speed>|<current-file>
+#   <progress> is "done/total" from rsync's to-chk counter, or "pct%" as fallback
 #   RETRYING|<attempt>|<wake-epoch>|<exit-code>|
 #   DONE|<attempt>|||
 #   FAILED|<attempt>|<exit-code>||
@@ -264,7 +285,7 @@ display_loop() {
 
   local n="${#labels[@]}"
   local total=$(( n + 4 ))  # elapsed + top separator + column headers + n rows + bottom separator
-  local start_time; start_time=$(date +%s)
+  local _disp_start=$SECONDS  # bash builtin — no subshell needed
 
   # Terminal width: inherited from the parent shell (set just before display_loop &),
   # where tput cols has reliable TTY access. All three tables use this single value.
@@ -290,8 +311,9 @@ display_loop() {
   local _st_path_w=$(( (term_cols - 20) / 2 ))
   local _st_path_w2=$(( term_cols - 20 - _st_path_w ))
 
-  # Status table — file columns fill remaining space after the fixed columns (50 + 2 separator)
-  local _file_avail=$(( term_cols - 52 ))
+  # Status table — file columns fill remaining space after the fixed columns (52 + 2 separator)
+  # Fixed overhead: 2+10+2+6+4+2+10+2+12+2 = 52, plus the 2-char sep before PATH = 54
+  local _file_avail=$(( term_cols - 54 ))
   local _name_w=$(( _file_avail / 3 ))
   [ "$_name_w" -lt 12 ] && _name_w=12  # must fit "CURRENT FILE" header without overflowing
   local _path_w=$(( _file_avail - _name_w ))
@@ -369,13 +391,13 @@ BANNER
   while true; do
     printf '\033[%dA' "$total"  # move cursor back to top of display area
 
-    local elapsed=$(( $(date +%s) - start_time ))
+    local elapsed=$(( SECONDS - _disp_start ))
     printf ' elapsed %02d:%02d\033[K\n' \
       "$(( elapsed / 60 ))" "$(( elapsed % 60 ))"
     printf '%s\033[K\n' "$sep"
-    # Column headers — SET% is overall bytes transferred across the whole set, not per-file
-    printf "  %-10s  %-4s  %-4s  %-8s  %-12s  %-*s  %s\033[K\n" \
-      "LABEL" "ST" "ATT" "SET %" "SPEED" "$_name_w" "CURRENT FILE" "PATH"
+    # Column headers — FILES shows rsync to-chk progress (files done / total files in set)
+    printf "  %-10s  %-4s  %-4s  %-10s  %-12s  %-*s  %s\033[K\n" \
+      "LABEL" "ST" "ATT" "FILES" "SPEED" "$_name_w" "CURRENT FILE" "PATH"
 
     local idx
     for idx in "${!labels[@]}"; do
@@ -403,7 +425,7 @@ BANNER
           fi
           [ "${#fname}" -gt "$_name_w" ] && fname="${fname:0:$(( _name_w - 1 ))}…"
           [ "${#fdir}" -gt "$_path_w" ] && fdir="${fdir:0:$(( _path_w - 1 ))}…"
-          printf "  %-10s  ${_c_run}▶${_rs}     %-4s  %-8s  %-12s  %-*s  %s\033[K\n" \
+          printf "  %-10s  ${_c_run}▶${_rs}     %-4s  %-10s  %-12s  %-*s  %s\033[K\n" \
             "$lbl_disp" "$attempt" "${f3:----}" "${f4:------}" "$_name_w" "$fname" "$fdir"
           ;;
         RETRYING)
@@ -463,7 +485,8 @@ run_set() {
   fi
 
   echo "label=$label src=$rsync_src dst=$rsync_dst log=$LOG_FILE" >> "$LOG_FILE"
-  printf 'WAITING|0||||\n' > "$status_file"
+  printf 'WAITING|0||||\n' > "${status_file}.tmp"
+  mv "${status_file}.tmp" "$status_file"
 
   if [ "${verbose,,}" = "true" ]; then
     preflight_check "$LOG_FILE" "$source_host" "$src_path" "source" >/dev/null
@@ -473,18 +496,21 @@ run_set() {
   while true; do
     if [ -f "$STOPALLFILE" ]; then
       echo "STOPALL file exists: canceling $label" >> "$LOG_FILE"
-      printf 'FAILED|%s|stopped||\n' "$attempt" > "$status_file"
+      printf 'FAILED|%s|stopped||\n' "$attempt" > "${status_file}.tmp"
+      mv "${status_file}.tmp" "$status_file"
       return 1
     fi
 
     if [ ! -f "$stopfile" ]; then
       echo "$stopfile does not exist: canceling $label" >> "$LOG_FILE"
-      printf 'FAILED|%s|stopped||\n' "$attempt" > "$status_file"
+      printf 'FAILED|%s|stopped||\n' "$attempt" > "${status_file}.tmp"
+      mv "${status_file}.tmp" "$status_file"
       return 1
     fi
 
     echo "Attempt: $((attempt + 1))" >> "$LOG_FILE"
-    printf 'RUNNING|%s|---|---|starting\n' "$((attempt + 1))" > "$status_file"
+    printf 'RUNNING|%s|---|---|starting\n' "$((attempt + 1))" > "${status_file}.tmp"
+    mv "${status_file}.tmp" "$status_file"
 
     local rsync_exit_tmp="$working_directory/loop/${label}-exitcode"
     local rsync_cmd
@@ -503,16 +529,31 @@ run_set() {
       # Progress line: "   1,234,567  45%   2.34MB/s    0:00:15 (xfr#5, to-chk=42/100)"
       if [[ "$line" =~ ^[[:space:]]+[^[:space:]]+[[:space:]]+([0-9]+)%[[:space:]]+([0-9.]+[kKMGTP]?B/s) ]]; then
         local cf; cf=$(cat "$curfile_tmp" 2>/dev/null || printf '%s' '-')
+        local pct="${BASH_REMATCH[1]}" speed="${BASH_REMATCH[2]}"
+        local progress
+        # Prefer file-count progress from to-chk=N/M (files remaining / total).
+        # Note: the to-chk denominator grows while rsync is still scanning, so early
+        # in a job the total may jump (e.g. 5/50 → 5/2000). Once scanning finishes
+        # the count descends steadily to done/done.
+        # Falls back to byte percentage when to-chk is absent (e.g. older rsync builds).
+        if [[ "$line" =~ to-chk=([0-9]+)/([0-9]+) ]]; then
+          local files_done=$(( ${BASH_REMATCH[2]} - ${BASH_REMATCH[1]} ))
+          progress="${files_done}/${BASH_REMATCH[2]}"
+        else
+          progress="${pct}%"
+        fi
         # Filenames containing '|' (valid on Unix) are sanitised with '?' to protect
         # the pipe-delimited status file format; display only — no data is lost.
-        printf 'RUNNING|%s|%s%%|%s|%s\n' \
-          "$((attempt + 1))" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${cf//|/?}" \
-          > "$status_file"
+        printf 'RUNNING|%s|%s|%s|%s\n' \
+          "$((attempt + 1))" "$progress" "$speed" "${cf//|/?}" \
+          > "${status_file}.tmp"
+        mv "${status_file}.tmp" "$status_file"
       # Filename line: non-empty, starts with non-space, not a stats/message line
       elif [[ -n "$line" ]] && [[ "$line" =~ ^[^[:space:]] ]] && \
            ! [[ "$line" =~ ^(sent\ |received\ |total\ |Total\ |Number\ |File\ list|Literal|Matched|creating\ |rsync:\ |building|delta-|sending\ incremental|done\ count|created\ dir|opening\ connection|\.[cdLDS]) ]]; then
         printf '%s\n' "$line" > "$curfile_tmp"
-        printf 'RUNNING|%s|---|---|%s\n' "$((attempt + 1))" "${line:0:100}" > "$status_file"
+        printf 'RUNNING|%s|---|---|%s\n' "$((attempt + 1))" "${line:0:100}" > "${status_file}.tmp"
+        mv "${status_file}.tmp" "$status_file"
       fi
     done || true
 
@@ -524,7 +565,12 @@ run_set() {
       rm -f "$stopfile"
       echo "rsync completed successfully" >> "$LOG_FILE"
       echo "***********************************************" >> "$LOG_FILE"
-      printf 'DONE|%s|||\n' "$((attempt + 1))" > "$status_file"
+      printf 'DONE|%s|||\n' "$((attempt + 1))" > "${status_file}.tmp"
+      mv "${status_file}.tmp" "$status_file"
+      # Close the ControlMaster socket now that this set is finished; it would
+      # expire on its own after ControlPersist=60 s but explicit cleanup is cleaner.
+      local ctrl_host="${source_host:-$target_host}"
+      [ -n "$ctrl_host" ] && ssh -O exit -o "ControlPath=$ssh_control_path" -p "$ssh_port" "$ctrl_host" 2>/dev/null || true
       return 0
     fi
 
@@ -535,14 +581,16 @@ run_set() {
           echo "rsync failed with exit $status after $attempt retries; giving up" >> "$LOG_FILE"
           echo "***********************************************" >> "$LOG_FILE"
           rm -f "$stopfile"
-          printf 'FAILED|%s|%s||\n' "$attempt" "$status" > "$status_file"
+          printf 'FAILED|%s|%s||\n' "$attempt" "$status" > "${status_file}.tmp"
+          mv "${status_file}.tmp" "$status_file"
           return 1
         fi
         echo "rsync transient failure exit $status; retrying in $base_delay seconds" >> "$LOG_FILE"
         echo "***********************************************" >> "$LOG_FILE"
         local wake_at=$(( $(date +%s) + base_delay ))
-        printf 'RETRYING|%s|%s|%s|\n' "$attempt" "$wake_at" "$status" > "$status_file"
-        sleep $base_delay
+        printf 'RETRYING|%s|%s|%s|\n' "$attempt" "$wake_at" "$status" > "${status_file}.tmp"
+        mv "${status_file}.tmp" "$status_file"
+        sleep "$base_delay"
         base_delay=$((base_delay * 2))
         [ "$base_delay" -gt 300 ] && base_delay=300
         # Close any stale ControlMaster socket so the next attempt opens a fresh connection
@@ -579,7 +627,8 @@ run_set() {
         echo "rsync failed (exit $status): $err_msg" >> "$LOG_FILE"
         echo "***********************************************" >> "$LOG_FILE"
         rm -f "$stopfile"
-        printf 'FAILED|%s|%s||\n' "$((attempt + 1))" "$status" > "$status_file"
+        printf 'FAILED|%s|%s||\n' "$((attempt + 1))" "$status" > "${status_file}.tmp"
+        mv "${status_file}.tmp" "$status_file"
         return 1
         ;;
     esac
@@ -607,7 +656,7 @@ done
 
 kill "$display_pid" 2>/dev/null || true
 wait "$display_pid" 2>/dev/null || true
-rm -f "$working_directory/loop/"*-STATUS 2>/dev/null || true
+rm -f "$working_directory/loop/"*-STATUS "$working_directory/loop/"*-STATUS.tmp 2>/dev/null || true
 rmdir "$working_directory/loop" 2>/dev/null || true
 
 if [ "$exit_code" -eq 0 ]; then
