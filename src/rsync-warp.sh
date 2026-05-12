@@ -485,8 +485,7 @@ run_set() {
   fi
 
   echo "label=$label src=$rsync_src dst=$rsync_dst log=$LOG_FILE" >> "$LOG_FILE"
-  printf 'WAITING|0||||\n' > "${status_file}.tmp"
-  mv "${status_file}.tmp" "$status_file"
+  printf 'WAITING|0||||\n' > "$status_file"
 
   if [ "${verbose,,}" = "true" ]; then
     preflight_check "$LOG_FILE" "$source_host" "$src_path" "source" >/dev/null
@@ -496,21 +495,18 @@ run_set() {
   while true; do
     if [ -f "$STOPALLFILE" ]; then
       echo "STOPALL file exists: canceling $label" >> "$LOG_FILE"
-      printf 'FAILED|%s|stopped||\n' "$attempt" > "${status_file}.tmp"
-      mv "${status_file}.tmp" "$status_file"
+      printf 'FAILED|%s|stopped||\n' "$attempt" > "$status_file"
       return 1
     fi
 
     if [ ! -f "$stopfile" ]; then
       echo "$stopfile does not exist: canceling $label" >> "$LOG_FILE"
-      printf 'FAILED|%s|stopped||\n' "$attempt" > "${status_file}.tmp"
-      mv "${status_file}.tmp" "$status_file"
+      printf 'FAILED|%s|stopped||\n' "$attempt" > "$status_file"
       return 1
     fi
 
     echo "Attempt: $((attempt + 1))" >> "$LOG_FILE"
-    printf 'RUNNING|%s|---|---|starting\n' "$((attempt + 1))" > "${status_file}.tmp"
-    mv "${status_file}.tmp" "$status_file"
+    printf 'RUNNING|%s|---|---|starting\n' "$((attempt + 1))" > "$status_file"
 
     local rsync_exit_tmp="$working_directory/loop/${label}-exitcode"
     local rsync_cmd
@@ -550,14 +546,12 @@ run_set() {
         # the pipe-delimited status file format; display only — no data is lost.
         printf 'RUNNING|%s|%s|%s|%s\n' \
           "$((attempt + 1))" "$progress" "$speed" "${cf//|/?}" \
-          > "${status_file}.tmp"
-        mv "${status_file}.tmp" "$status_file"
+          > "$status_file"
       # Filename line: non-empty, starts with non-space, not a stats/message line
       elif [[ -n "$line" ]] && [[ "$line" =~ ^[^[:space:]] ]] && \
            ! [[ "$line" =~ ^(sent\ |received\ |total\ |Total\ |Number\ |File\ list|Literal|Matched|creating\ |rsync:\ |building|delta-|sending\ incremental|done\ count|created\ dir|opening\ connection|\.[cdLDS]) ]]; then
         printf '%s\n' "$line" > "$curfile_tmp"
-        printf 'RUNNING|%s|---|---|%s\n' "$((attempt + 1))" "${line:0:100}" > "${status_file}.tmp"
-        mv "${status_file}.tmp" "$status_file"
+        printf 'RUNNING|%s|---|---|%s\n' "$((attempt + 1))" "${line:0:100}" > "$status_file"
       fi
     done || true
 
@@ -569,8 +563,7 @@ run_set() {
       rm -f "$stopfile"
       echo "rsync completed successfully" >> "$LOG_FILE"
       echo "***********************************************" >> "$LOG_FILE"
-      printf 'DONE|%s|||\n' "$((attempt + 1))" > "${status_file}.tmp"
-      mv "${status_file}.tmp" "$status_file"
+      printf 'DONE|%s|||\n' "$((attempt + 1))" > "$status_file"
       # Close the ControlMaster socket now that this set is finished; it would
       # expire on its own after ControlPersist=60 s but explicit cleanup is cleaner.
       local ctrl_host="${source_host:-$target_host}"
@@ -585,15 +578,13 @@ run_set() {
           echo "rsync failed with exit $status after $attempt retries; giving up" >> "$LOG_FILE"
           echo "***********************************************" >> "$LOG_FILE"
           rm -f "$stopfile"
-          printf 'FAILED|%s|%s||\n' "$attempt" "$status" > "${status_file}.tmp"
-          mv "${status_file}.tmp" "$status_file"
+          printf 'FAILED|%s|%s||\n' "$attempt" "$status" > "$status_file"
           return 1
         fi
         echo "rsync transient failure exit $status; retrying in $base_delay seconds" >> "$LOG_FILE"
         echo "***********************************************" >> "$LOG_FILE"
         local wake_at=$(( $(date +%s) + base_delay ))
-        printf 'RETRYING|%s|%s|%s|\n' "$attempt" "$wake_at" "$status" > "${status_file}.tmp"
-        mv "${status_file}.tmp" "$status_file"
+        printf 'RETRYING|%s|%s|%s|\n' "$attempt" "$wake_at" "$status" > "$status_file"
         sleep "$base_delay"
         base_delay=$((base_delay * 2))
         [ "$base_delay" -gt 300 ] && base_delay=300
@@ -631,8 +622,7 @@ run_set() {
         echo "rsync failed (exit $status): $err_msg" >> "$LOG_FILE"
         echo "***********************************************" >> "$LOG_FILE"
         rm -f "$stopfile"
-        printf 'FAILED|%s|%s||\n' "$((attempt + 1))" "$status" > "${status_file}.tmp"
-        mv "${status_file}.tmp" "$status_file"
+        printf 'FAILED|%s|%s||\n' "$((attempt + 1))" "$status" > "$status_file"
         return 1
         ;;
     esac
