@@ -526,19 +526,23 @@ run_set() {
       "${rsync_cmd[@]}" 2>&1
       printf '%s\n' "$?" > "$rsync_exit_tmp"
     } | _cr_to_lf | while IFS= read -r line; do
-      # Progress line: "   1,234,567  45%   2.34MB/s    0:00:15 (xfr#5, to-chk=42/100)"
+      # Progress line (scan phase):    "   1,234,567   0%    0.00kB/s    0:00:00 (xfr#1, ir-chk=42/100)"
+      # Progress line (transfer phase): "   1,234,567  45%   2.34MB/s    0:00:15 (xfr#5, to-chk=42/100)"
       if [[ "$line" =~ ^[[:space:]]+[^[:space:]]+[[:space:]]+([0-9]+)%[[:space:]]+([0-9.]+[kKMGTP]?B/s) ]]; then
         local cf; cf=$(cat "$curfile_tmp" 2>/dev/null || printf '%s' '-')
         local pct="${BASH_REMATCH[1]}" speed="${BASH_REMATCH[2]}"
         local progress
-        # Prefer file-count progress from to-chk=N/M (files remaining / total).
-        # Note: the to-chk denominator grows while rsync is still scanning, so early
-        # in a job the total may jump (e.g. 5/50 → 5/2000). Once scanning finishes
-        # the count descends steadily to done/done.
-        # Falls back to byte percentage when to-chk is absent (e.g. older rsync builds).
-        if [[ "$line" =~ to-chk=([0-9]+)/([0-9]+) ]]; then
-          local files_done=$(( ${BASH_REMATCH[2]} - ${BASH_REMATCH[1]} ))
-          progress="${files_done}/${BASH_REMATCH[2]}"
+        # Prefer file-count progress from rsync's file counter (remaining / total).
+        # rsync uses two counter names depending on phase:
+        #   ir-chk=N/M  incremental recursion scan (rsync is still discovering files)
+        #   to-chk=N/M  transfer phase (rsync is transferring/checking files)
+        # Both show files remaining / total, so we match either.
+        # Note: the denominator grows during the ir-chk scan phase, so early totals
+        # may jump (e.g. 5/50 → 5/2000) until scanning finishes.
+        # Falls back to byte percentage when neither is present (older rsync builds).
+        if [[ "$line" =~ (to-chk|ir-chk)=([0-9]+)/([0-9]+) ]]; then
+          local files_done=$(( ${BASH_REMATCH[3]} - ${BASH_REMATCH[2]} ))
+          progress="${files_done}/${BASH_REMATCH[3]}"
         else
           progress="${pct}%"
         fi
