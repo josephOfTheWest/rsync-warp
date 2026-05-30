@@ -348,6 +348,8 @@ bash src/rsync-warp.sh --status
 
 Each `label source-path target-path` group is launched as a background process. All sets run concurrently — a slow or large set does not block others. The script waits for all sets to complete and exits with a non-zero code if any set failed.
 
+To prevent simultaneous SSH handshakes from exceeding the remote sshd `MaxStartups` limit (which causes immediate exit-255 failures), each set delays its startup by `N × stagger_secs` seconds, where N is the set's zero-based position in the argument list and `stagger_secs` defaults to 8. The first set starts immediately; subsequent sets start 8 s, 16 s, 24 s… after it. Override with the `RSYNC_WARP_STAGGER` environment variable.
+
 ### Retry and Backoff
 
 rsync-warp automatically retries on transient network errors (rsync exit codes 10, 12, 30, 32, 35, 255). The retry delay starts at 5 seconds and doubles after each failure, capped at 300 seconds (5 minutes). After 10 consecutive failures the set is abandoned.
@@ -367,6 +369,8 @@ Non-transient errors (e.g. permission denied, bad source path) cause immediate f
 ### SSH ControlMaster
 
 rsync-warp uses SSH ControlMaster to multiplex all rsync connections — including retries — over a single persistent SSH session. This eliminates repeated TCP handshakes and SSH key exchanges, which is especially beneficial on high-latency links or when retries are frequent.
+
+After the startup stagger delay, each set runs a brief `ssh … true` to establish the ControlMaster socket synchronously before the file pre-count and rsync both try to use it. This serialises connection setup into a single known-good handshake; subsequent connections attach to it as slaves.
 
 The control socket is created at `/tmp/rsync-warp-<user>@<host>:<port>` and persists for 60 seconds after the last connection closes.
 
@@ -468,6 +472,7 @@ All tunable values are near the top of `run_set` and at the `rsync_base`/`ssh_op
 | Initial retry delay | `base_delay` | `5` seconds | Doubles after each failure, capped at 300 s |
 | Transfer timeout | `rsync_base` | `120` seconds | rsync `--timeout` idle-data value — triggers a retry if no bytes are received for this long |
 | Modify window | `rsync_base` | `1` second | Timestamp tolerance (`--modify-window`) |
+| Startup stagger | `RSYNC_WARP_STAGGER` env var | `8` seconds | Seconds between each set's SSH startup. Set 0 starts immediately; set N waits `N × stagger_secs`. Set to `0` to disable. |
 
 ---
 
@@ -532,6 +537,12 @@ SSH connection refused or key not accepted. Verify with:
 ssh -p 22 user@remote.example.com echo ok
 ```
 Replace `user@remote.example.com` with your remote-host as appropriate.
+
+When running multiple sets simultaneously, all sets connecting at once can exceed the remote sshd `MaxStartups` limit (default `10:30:100`), causing some connections to be refused before any data is exchanged. rsync-warp staggers startup by 8 seconds per set to spread handshakes. If failures persist, increase the stagger:
+```bash
+RSYNC_WARP_STAGGER=15 bash src/rsync-warp.sh …
+```
+Or raise `MaxStartups` in `/etc/ssh/sshd_config` on the remote host.
 
 **Transfer stalls and never completes**
 The `ServerAliveInterval=30` and `ServerAliveCountMax=5` SSH options will detect a dead connection after ~150 seconds and trigger a retry automatically.
