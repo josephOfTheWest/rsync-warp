@@ -225,6 +225,12 @@ ssh_opts="ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=
 
 max_retries=10
 
+# Seconds between each set's startup when multiple sets run in parallel.
+# Spreads SSH handshakes so they don't all race to establish connections simultaneously,
+# which can exceed the remote sshd MaxStartups limit and cause immediate exit-255 failures.
+# Override with RSYNC_WARP_STAGGER=N (set to 0 to disable).
+stagger_secs="${RSYNC_WARP_STAGGER:-8}"
+
 # Converts \r to \n with line-buffered output so --info=progress2 updates reach the
 # parser immediately rather than waiting for the pipe buffer to fill.
 # Falls back to plain tr if stdbuf is unavailable.
@@ -511,6 +517,10 @@ run_set() {
   local attempt=0
   local base_delay=5
 
+  # Stagger startup: set N waits N*stagger_secs before doing any SSH work.
+  # Prevents all sets from racing to establish SSH connections simultaneously.
+  [ "$idx" -gt 0 ] && [ "${stagger_secs:-0}" -gt 0 ] && sleep "$(( idx * stagger_secs ))"
+
   local LOG_FILE="${working_directory}/rsynclogs/${label}-$(date +%Y-%m-%d_%H-%M-%S).txt"
 
   # Resolve source path
@@ -539,6 +549,19 @@ run_set() {
   if [ "${verbose,,}" = "true" ]; then
     preflight_check "$LOG_FILE" "$source_host" "$src_path" "source" >/dev/null
     preflight_check "$LOG_FILE" "$target_host" "$dst_path" "target" >/dev/null
+  fi
+
+  # Establish the ControlMaster socket once, synchronously, before count_source_files
+  # and rsync both try to use it. Without this, count_source_files and the first rsync
+  # attempt race to create the master — running `ssh true` here serialises that into a
+  # single known-good connection that both subsequent commands inherit as a slave.
+  local ctrl_host="${source_host:-$target_host}"
+  if [ -n "$ctrl_host" ]; then
+    ssh -p "$ssh_port" -o BatchMode=yes \
+      -o ControlMaster=auto -o "ControlPath=$ssh_control_path" -o ControlPersist=60 \
+      -o ConnectTimeout=15 "$ctrl_host" true 2>/dev/null \
+      && echo "ControlMaster established for $ctrl_host" >> "$LOG_FILE" \
+      || echo "ControlMaster warm-up failed for $ctrl_host (will retry on first rsync attempt)" >> "$LOG_FILE"
   fi
 
   # Count source files once before the retry loop so the progress display has a
