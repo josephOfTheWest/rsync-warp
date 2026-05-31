@@ -19,6 +19,7 @@ A Bash wrapper around `rsync` that optimizes and controls file transfers between
   - [Examples](#examples)
 - [How It Works](#how-it-works)
   - [Parallel Execution](#parallel-execution)
+  - [Live Progress (FILES column)](#live-progress-files-column)
   - [Retry and Backoff](#retry-and-backoff)
   - [SSH ControlMaster](#ssh-controlmaster)
   - [Compression](#compression)
