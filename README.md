@@ -350,6 +350,15 @@ Each `label source-path target-path` group is launched as a background process. 
 
 To prevent simultaneous SSH handshakes from exceeding the remote sshd `MaxStartups` limit (which causes immediate exit-255 failures), each set delays its startup by `N × stagger_secs` seconds, where N is the set's zero-based position in the argument list and `stagger_secs` defaults to 8. The first set starts immediately; subsequent sets start 8 s, 16 s, 24 s… after it. Override with the `RSYNC_WARP_STAGGER` environment variable.
 
+### Live Progress (FILES column)
+
+The status display shows a `FILES` column with an `X/Y` file-count progress indicator:
+
+- **Local source** — rsync-warp runs `find` on the source tree before rsync starts to get a fixed total. The denominator is stable from the very first progress update.
+- **Remote source** — a pre-count would require an extra SSH channel concurrently with rsync, which disrupts in-flight transfers on some SSH implementations. Instead, rsync-warp locks the denominator from rsync's own `to-chk=N/M` counter the first time it appears (once the scan phase finishes, `M` is stable). During the preceding scan phase the denominator grows as rsync discovers files, then snaps to the locked value once transfers begin.
+
+In both cases the numerator is cached between rsync progress updates so the column stays stable during multi-gigabyte file transfers (rsync only emits the file counter on the final progress line of each file).
+
 ### Retry and Backoff
 
 rsync-warp automatically retries on transient network errors (rsync exit codes 10, 12, 30, 32, 35, 255). The retry delay starts at 5 seconds and doubles after each failure, capped at 300 seconds (5 minutes). After 10 consecutive failures the set is abandoned.
@@ -370,9 +379,7 @@ Non-transient errors (e.g. permission denied, bad source path) cause immediate f
 
 rsync-warp uses SSH ControlMaster to multiplex all rsync connections — including retries — over a single persistent SSH session. This eliminates repeated TCP handshakes and SSH key exchanges, which is especially beneficial on high-latency links or when retries are frequent.
 
-After the startup stagger delay, each set runs a brief `ssh … true` to establish the ControlMaster socket synchronously before the file pre-count and rsync both try to use it. This serialises connection setup into a single known-good handshake; subsequent connections attach to it as slaves.
-
-The control socket is created at `/tmp/rsync-warp-<user>@<host>:<port>` and persists for 60 seconds after the last connection closes.
+The control socket is created at `/tmp/rsync-warp-<user>@<host>:<port>` (one socket per user/host/port tuple, shared across all sets targeting the same host) and persists for 60 seconds after the last connection closes. rsync establishes the socket on its first connection attempt; the stagger delay ensures no two sets race to create it simultaneously.
 
 ### Compression
 

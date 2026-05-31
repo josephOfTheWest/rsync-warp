@@ -551,34 +551,19 @@ run_set() {
     preflight_check "$LOG_FILE" "$target_host" "$dst_path" "target" >/dev/null
   fi
 
-  # Establish the ControlMaster socket once, synchronously, before count_source_files
-  # and rsync both try to use it. Without this, count_source_files and the first rsync
-  # attempt race to create the master — running `ssh true` here serialises that into a
-  # single known-good connection that both subsequent commands inherit as a slave.
-  local ctrl_host="${source_host:-$target_host}"
-  if [ -n "$ctrl_host" ]; then
-    ssh -p "$ssh_port" -o BatchMode=yes \
-      -o ControlMaster=auto -o "ControlPath=$ssh_control_path" -o ControlPersist=60 \
-      -o ConnectTimeout=15 "$ctrl_host" true 2>/dev/null \
-      && echo "ControlMaster established for $ctrl_host" >> "$LOG_FILE" \
-      || echo "ControlMaster warm-up failed for $ctrl_host (will retry on first rsync attempt)" >> "$LOG_FILE"
-  fi
-
-  # Count source files once before the retry loop so the progress display has a
-  # stable denominator throughout the transfer (rsync's own M in ir-chk=N/M grows
-  # during the scan phase, making the percentage appear to shrink).
+  # Pre-count source files for a stable progress denominator — local sources only.
+  # For remote sources (source_host set) we skip this: running an SSH find concurrently
+  # with rsync adds a channel to the shared ControlMaster connection, which disrupts the
+  # in-flight rsync on some NAS SSH implementations. Remote sources instead lock the
+  # denominator from rsync's own first to-chk=N/M line (see progress parser below).
   local file_total=0
-  local _cnt_path
-  if [ -n "$source_host" ]; then
-    _cnt_path="$src_path"
-  elif [[ "$src_path" == /* ]]; then
-    _cnt_path="$src_path"
-  else
-    _cnt_path="$working_directory/$src_path"
+  if [ -z "${source_host:-}" ]; then
+    local _cnt_path
+    [[ "$src_path" == /* ]] && _cnt_path="$src_path" || _cnt_path="$working_directory/$src_path"
+    file_total=$(count_source_files "" "$_cnt_path" \
+      "$ssh_port" "$working_directory/exclude-files.txt") || file_total=0
+    echo "source file count: $file_total" >> "$LOG_FILE"
   fi
-  file_total=$(count_source_files "${source_host:-}" "$_cnt_path" \
-    "$ssh_port" "$working_directory/exclude-files.txt") || file_total=0
-  echo "source file count: $file_total" >> "$LOG_FILE"
 
   while true; do
     if [ -f "$STOPALLFILE" ]; then
@@ -617,19 +602,27 @@ run_set() {
         local pct="${BASH_REMATCH[1]}" speed="${BASH_REMATCH[2]}"
         local progress
         # Track file-count progress from rsync's ir-chk / to-chk counters.
-        #   ir-chk=N/M  scan phase: N files remaining to discover, M total found so far
-        #   to-chk=N/M  transfer phase: N files remaining to transfer/verify, M total
+        #   ir-chk=N/M  scan phase: N files remaining to discover, M grows as rsync scans
+        #   to-chk=N/M  transfer phase: N files remaining, M is stable (scan complete)
         # files_done = M - N (files processed so far in either phase).
-        # file_total is pre-counted by find before rsync started, giving a stable
-        # denominator that doesn't grow as rsync discovers more files during ir-chk.
-        # Falls back to rsync's own M if find returned 0 (e.g. permission error).
-        # During to-chk, the counter only appears on the final (100%) line of each
-        # file; intermediate byte-level updates have no counter. We cache the last
-        # known count in _last_file_progress so the column stays stable instead of
-        # reverting to byte-percentage between counter updates.
+        #
+        # Denominator priority (highest → lowest):
+        #   1. file_total  — find pre-count (local source only); fully stable from t=0
+        #   2. _locked_total — rsync's M from the first to-chk line; stable once set
+        #   3. rsync's live M — grows during ir-chk, used only until option 2 is available
+        #
+        # For remote sources we can't run a pre-count without adding an extra SSH channel
+        # that disrupts the in-flight rsync connection, so we rely on options 2 and 3.
+        # During to-chk, the counter only appears on the final (100%) line of each file;
+        # intermediate byte-level updates have no counter. We cache the last known value
+        # in _last_file_progress so the column stays stable between counter updates.
         if [[ "$line" =~ (to-chk|ir-chk)=([0-9]+)/([0-9]+) ]]; then
           local files_done=$(( ${BASH_REMATCH[3]} - ${BASH_REMATCH[2]} ))
-          local denom; denom=$(( file_total > 0 ? file_total : ${BASH_REMATCH[3]} ))
+          if [[ "${BASH_REMATCH[1]}" == "to-chk" ]] && [ -z "${_locked_total:-}" ]; then
+            _locked_total="${BASH_REMATCH[3]}"
+          fi
+          local denom="${_locked_total:-${BASH_REMATCH[3]}}"
+          [ "${file_total:-0}" -gt 0 ] && denom="$file_total"
           _last_file_progress="${files_done}/${denom}"
           progress="$_last_file_progress"
         else
