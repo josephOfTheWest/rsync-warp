@@ -380,7 +380,7 @@ Non-transient errors (e.g. permission denied, bad source path) cause immediate f
 
 rsync-warp uses SSH ControlMaster to multiplex all rsync connections — including retries — over a single persistent SSH session. This eliminates repeated TCP handshakes and SSH key exchanges, which is especially beneficial on high-latency links or when retries are frequent.
 
-The control socket is created at `/tmp/rsync-warp-<user>@<host>:<port>` (one socket per user/host/port tuple, shared across all sets targeting the same host) and persists for 60 seconds after the last connection closes. rsync establishes the socket on its first connection attempt; the stagger delay ensures no two sets race to create it simultaneously.
+Each set gets its own control socket at `/tmp/rsync-warp-<label>-<user>@<host>:<port>`, so concurrent sets targeting the same host use independent SSH connections rather than a shared multiplexed one. Sharing a single master across sets causes new-set rsync handshakes to inject traffic into a connection that may already be saturated (e.g. streaming a large file list), disrupting in-flight transfers with exit-255 failures. Within a set, all retry attempts reuse the same socket, preserving the handshake-elimination benefit.
 
 ### Compression
 

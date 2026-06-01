@@ -517,6 +517,15 @@ run_set() {
   local attempt=0
   local base_delay=5
 
+  # Per-set ControlMaster socket: embed the label so each set gets its own
+  # independent SSH connection. Sharing one master across concurrent sets causes
+  # every new set's rsync handshake to inject traffic into a connection that may
+  # already be saturated (e.g. streaming a 500K-file list), disrupting it with
+  # exit-255 failures. Retries still benefit from the master — same label = same
+  # socket = same persistent connection.
+  local ssh_control_path="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/rsync-warp-${label}-%r@%h:%p"
+  local ssh_opts="ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -p $ssh_port -o ControlMaster=auto -o ControlPath=$ssh_control_path -o ControlPersist=60"
+
   # Stagger startup: set N waits N*stagger_secs before doing any SSH work.
   # Prevents all sets from racing to establish SSH connections simultaneously.
   [ "$idx" -gt 0 ] && [ "${stagger_secs:-0}" -gt 0 ] && sleep "$(( idx * stagger_secs ))"
