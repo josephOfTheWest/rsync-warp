@@ -502,6 +502,18 @@ BANNER
     done
 
     printf '%s\033[K\n' "$sep"
+    # Exit as soon as every set is in a terminal state so the final render
+    # (drawn above) remains visible before the main script prints its summary.
+    # Without this the main script kills the display mid-cycle, leaving the
+    # last-completed set still showing ▶ on a quick console inspection.
+    local _all_done=1 _di _sf _st
+    for _di in "${!labels[@]}"; do
+      _sf="$working_directory/loop/${labels[$_di]}-STATUS"
+      _st=""
+      [ -f "$_sf" ] && IFS='|' read -r _st _ _ _ _ < "$_sf" || true
+      case "${_st:-}" in DONE|FAILED) ;; *) _all_done=0; break ;; esac
+    done
+    [ "$_all_done" -eq 1 ] && break
     sleep 1 || true
   done
 }
